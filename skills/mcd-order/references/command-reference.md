@@ -155,6 +155,21 @@ mcd-cli order query <ORDER_ID>
 
 Returns order status and `payH5Url` for payment.
 
+### QR code output (`--qr` / `--qr-save`)
+
+`order create` supports two QR output flags:
+
+```bash
+mcd-cli order create ... --qr       # print a unicode QR in the terminal
+mcd-cli order create ... --qr-save  # write a PNG and print its path line
+```
+
+- `--qr-save`: writes the payment QR to `/tmp/mcd-qrcode/<orderId>.png` and prints one line
+  `  已经保存到 /tmp/mcd-qrcode/<orderId>.png`. In chat scenarios (QQ/WeChat bot) send that PNG
+  as an image message; on a desktop, open it with `open <path>` (macOS) or `xdg-open <path>` (Linux).
+- `--qr`: prints a unicode QR directly in the terminal, for when the user is right at a terminal.
+- Default (no flag): prints only the `payH5Url` text — no QR glyphs, no file.
+
 ## Coupons
 
 ```bash

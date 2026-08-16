@@ -135,6 +135,11 @@ ITEMS=$(./mcd-cli select 9900013304 --store 1990366 --order-type 1 --be-type 1 \
 # 查询订单
 ./mcd-cli order query <ORDER_ID>
 
+# 下单时落盘支付二维码（聊天场景拿路径发图 / open）
+./mcd-cli order create --store 1990366 --order-type 1 --be-type 1 \
+  --items '[{"productCode":"9900005462","quantity":1}]' \
+  --take-way take-in-store --qr-save
+
 # 查看优惠券
 ./mcd-cli coupon my
 ./mcd-cli coupon receive
