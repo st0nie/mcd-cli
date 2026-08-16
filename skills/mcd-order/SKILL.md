@@ -69,18 +69,43 @@ Reservation: append `--reservation-date "yyyy-MM-dd HH:mm"`.
 
 Record the `productCode` of desired items.
 
-### 3. Calculate price
+### 3. Customize combos (随心配 / choose meal items)
+
+`query-meal-detail` returns combo rounds (轮次选配) and 特调 (modification) options. Use `select`:
+
+```bash
+# Interactive: pick each round's item, optionally customize 特调 (去冰/加酱 etc.), outputs items JSON
+mcd-cli select <PRODUCT_CODE> --store <STORE_CODE> --order-type <ORDER_TYPE> --be-type <BE_TYPE>
+
+# Non-interactive: roundNumber=choiceCode, comma-separated rounds; --json prints ONLY the items JSON
+mcd-cli select <PRODUCT_CODE> --store <STORE_CODE> --order-type 1 --be-type 1 \
+  --pick "1=1600,2=3050" --json
+```
+
+Example — 随心配 (code `9900013304`, 蓝区=麦香鱼, 粉区=可乐中杯), then price it:
+
+```bash
+ITEMS=$(mcd-cli select 9900013304 --store <STORE_CODE> --order-type 1 --be-type 1 \
+  --pick "1=1600,2=3050" --json | tail -1)
+mcd-cli price --store <STORE_CODE> --order-type 1 --be-type 1 --items "$ITEMS"
+```
+
+The generated item includes `roundList` + `modification` (去冰/加料/去酱) entries that `price` and `order create` accept directly. Combo rounds where a choice supports 特调 are marked 【可特调】 — use `detail <CODE> --store <STORE> --order-type 1 --be-type 1 --mods` to preview all 特调 groups.
+
+### 4. Calculate price
 
 ```bash
 mcd-cli price --store <STORE_CODE> --order-type <ORDER_TYPE> --be-type <BE_TYPE> \
   --items '[{"productCode":"<CODE>","quantity":1}]'
 ```
 
+For combos, pass `select`-generated items (with `roundList`/`modification`) instead of hand-written JSON:
+
 With coupon: append `--coupon-id <COUPON_ID>` or `--coupon-code <CODE>`.
 
 From the result, save `takeWayList[].code` (required for dine-in / drive-thru orders).
 
-### 4. Create order
+### 5. Create order
 
 **Dine-in / Drive-thru:**
 
@@ -109,7 +134,7 @@ mcd-cli order create --store <STORE_CODE> --be <BE_CODE> --order-type 2 --be-typ
 
 **Reservation:** append `--reservation-date "yyyy-MM-dd HH:mm"` to any order create command.
 
-### 5. Query & pay
+### 6. Query & pay
 
 ```bash
 mcd-cli order query <ORDER_ID>

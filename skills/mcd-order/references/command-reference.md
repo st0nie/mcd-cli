@@ -63,6 +63,39 @@ mcd-cli menu --store <STORE_CODE> --order-type 1 --be-type 1 --reservation-date 
 mcd-cli detail <PRODUCT_CODE> --store <STORE_CODE> --order-type 1 --be-type 1
 ```
 
+Expand 特调 options:
+
+```bash
+mcd-cli detail <PRODUCT_CODE> --store <STORE_CODE> --order-type 1 --be-type 1 --mods
+```
+
+### Select / customize combo items (随心配 选餐)
+
+`select` fetches `query-meal-detail`, walks every round (轮次) asking you to pick a choice, offers 特调 for choices that support it, and emits the exact `items[]` JSON payload for `price` / `order create`.
+
+Interactive:
+
+```bash
+mcd-cli select <PRODUCT_CODE> --store <STORE_CODE> --order-type <ORDER_TYPE> --be-type <BE_TYPE>
+```
+
+Non-interactive (`--pick` = roundNumber=choiceCode, multiple codes comma-separated for multi-pick rounds; `--qty` = quantity):
+
+```bash
+mcd-cli select <PRODUCT_CODE> --store <STORE_CODE> --order-type 1 --be-type 1 \
+  --pick "1=1600,2=3050" --qty 1 --json
+```
+
+Pipe into `price` directly:
+
+```bash
+ITEMS=$(mcd-cli select 9900013304 --store <STORE_CODE> --order-type 1 --be-type 1 \
+  --pick "1=1600,2=3050" --json | tail -1)
+mcd-cli price --store <STORE_CODE> --order-type 1 --be-type 1 --items "$ITEMS"
+```
+
+Example 随心配 codes (人气经典随心配 `9900013304`, 精选超值随心配 `9900013291`): round 1 蓝区 / round 2 粉区 both pick exactly 1 item (e.g. `1600` 麦香鱼, `3050` 可乐中杯). Product codes vary by store — verify with `mcd-cli menu`.
+
 ## Price calculation
 
 ```bash

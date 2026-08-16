@@ -5,6 +5,7 @@
 ## 功能
 
 - 🔍 查询附近门店、浏览菜单、查看餐品详情
+- 🍟 **选餐定制**：随心配/套餐轮次选配 + 特调（去冰、加酱等），一键生成下单 JSON
 - 🥗 餐品营养信息查询（热量、蛋白质、脂肪等）
 - 🎫 查看/领取优惠券
 - 🛒 计算价格、创建订单、查询订单状态
@@ -87,6 +88,21 @@ Token 优先级：命令行参数 `--token` > 环境变量 `MCD_MCP_TOKEN` > 配
 # 餐品详情
 ./mcd-cli detail 4820 --store 1990366 --order-type 1 --be-type 1
 
+# 餐品详情（展开特调选项）
+./mcd-cli detail 9900013304 --store 1990366 --order-type 1 --be-type 1 --mods
+
+# 选餐定制：交互式选配（随心配 蓝区/粉区）并可特调，生成 items JSON
+./mcd-cli select 9900013304 --store 1990366 --order-type 1 --be-type 1
+
+# 选餐定制：非交互选配（轮次序号=商品code），只输出 items JSON（供管道使用）
+./mcd-cli select 9900013304 --store 1990366 --order-type 1 --be-type 1 \
+  --pick "1=1600,2=3050" --json
+
+# 选餐结果直接送入价格计算
+ITEMS=$(./mcd-cli select 9900013304 --store 1990366 --order-type 1 --be-type 1 \
+  --pick "1=1450,2=3050" --json | tail -1)
+./mcd-cli price --store 1990366 --order-type 1 --be-type 1 --items "$ITEMS"
+
 # 计算价格（到店取餐）
 ./mcd-cli price --store 1990366 --order-type 1 --be-type 1 \
   --items '[{"productCode":"9900005462","quantity":1}]'
@@ -149,7 +165,8 @@ Token 优先级：命令行参数 `--token` > 环境变量 `MCD_MCP_TOKEN` > 配
 | `address list` | 查看配送地址 |
 | `address add` | 新增配送地址 |
 | `menu` | 浏览菜单 |
-| `detail` | 餐品详情 |
+| `detail` | 餐品详情（`--mods` 展开特调） |
+| `select` | 选餐定制：轮次选配+特调，生成 items JSON（交互/`--pick`） |
 | `coupon store` | 门店可用优惠券 |
 | `coupon my` | 我的优惠券 |
 | `coupon available` | 可领优惠券列表 |
