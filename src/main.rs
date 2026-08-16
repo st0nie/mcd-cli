@@ -2,6 +2,7 @@ mod config;
 mod fmt;
 mod mcp;
 mod meal;
+mod tui;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -188,6 +189,8 @@ enum Commands {
     Config,
     /// 交互式点单模式
     Interactive,
+    /// TUI 点餐界面（门店搜索→菜单→选餐特调→购物篮→下单）
+    Tui,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1510,6 +1513,7 @@ async fn main() -> Result<()> {
                 run_order_query(&client, &id).await?
             }
         },
+        Some(Commands::Tui) => tui::run(client).await?,
         Some(Commands::Interactive) | None => {
             println!("🍟 麦当劳 MCP CLI v{}", env!("CARGO_PKG_VERSION"));
             println!("正在进入交互模式...\n");

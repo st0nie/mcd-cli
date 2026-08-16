@@ -97,6 +97,7 @@ pub fn parse_detail(data: &Value) -> Result<MealDetail> {
     serde_json::from_value(data.clone()).context("解析餐品详情失败")
 }
 
+#[derive(Clone)]
 pub struct ModSelection {
     pub values: Vec<Value>,
 }
