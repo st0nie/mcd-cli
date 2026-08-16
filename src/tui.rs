@@ -588,6 +588,12 @@ impl App {
     }
 
     async fn handle_menu(&mut self, code: KeyCode) -> Result<()> {
+        if code == KeyCode::Char('/') && self.menu_focus != MenuFocus::Search {
+            // 按 / 快速进入搜索框
+            self.menu_focus = MenuFocus::Search;
+            self.menu_search.clear();
+            return Ok(());
+        }
         if code == KeyCode::Tab {
             self.menu_focus = match self.menu_focus {
                 MenuFocus::Search => MenuFocus::Category,
