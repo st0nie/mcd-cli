@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 use serde_json::{Value, json};
@@ -40,6 +40,13 @@ enum Screen {
 enum Focus {
     City,
     Keyword,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum MenuFocus {
+    Search,
+    Category,
+    Items,
 }
 
 struct StoreItem {
@@ -96,6 +103,10 @@ pub struct App {
     // 菜单
     menu: Vec<MenuItem>,
     menu_state: ListState,
+    menu_categories: Vec<String>,
+    menu_cat_state: ListState,
+    menu_search: String,
+    menu_focus: MenuFocus,
 
     // 选餐
     detail: Option<MealDetail>,
@@ -326,6 +337,10 @@ impl App {
             store_name: String::new(),
             menu: Vec::new(),
             menu_state: ListState::default(),
+            menu_categories: Vec::new(),
+            menu_cat_state: ListState::default(),
+            menu_search: String::new(),
+            menu_focus: MenuFocus::Items,
             detail: None,
             combo_round: 0,
             combo_toggle: Vec::new(),
@@ -406,7 +421,8 @@ impl App {
         self.screen = match self.screen {
             Screen::StoreList => Screen::StoreSearch,
             Screen::Menu => Screen::StoreList,
-            Screen::Combo | Screen::Mods => Screen::Menu,
+            Screen::Combo => Screen::Menu,
+            Screen::Mods => Screen::Combo,
             Screen::Basket => Screen::Menu,
             Screen::Price => Screen::Basket,
             Screen::OrderResult => Screen::Basket,
@@ -483,14 +499,25 @@ impl App {
                     self.set_status("正在加载菜单...", StatusKind::Info);
                     match fetch_menu(&self.client, &code).await {
                         Ok(menu) => {
+                            let mut cats: Vec<String> = Vec::new();
+                            for m in &menu {
+                                if !cats.contains(&m.category) {
+                                    cats.push(m.category.clone());
+                                }
+                            }
+                            self.menu_categories = cats;
                             self.menu = menu;
                             self.menu_state = ListState::default();
+                            self.menu_cat_state = ListState::default();
+                            self.menu_cat_state.select(Some(0));
+                            self.menu_search.clear();
+                            self.menu_focus = MenuFocus::Items;
                             if !self.menu.is_empty() {
                                 self.menu_state.select(Some(0));
                             }
                             self.screen = Screen::Menu;
                             self.set_status(
-                                "↑↓ 浏览，Enter 加购，b 购物篮，Esc 返回",
+                                "Tab 切换 搜索/分类/餐品，Enter 加购，b 购物篮",
                                 StatusKind::Info,
                             );
                         }
@@ -504,45 +531,99 @@ impl App {
     }
 
     // 菜单
-    async fn handle_menu(&mut self, code: KeyCode) -> Result<()> {
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => list_prev(&mut self.menu_state, self.menu.len()),
-            KeyCode::Down | KeyCode::Char('j') => list_next(&mut self.menu_state, self.menu.len()),
-            KeyCode::Char('b') => {
-                self.open_basket();
+    fn visible_menu(&self) -> Vec<usize> {
+        let cat = self.menu_cat_state.selected().and_then(|i| {
+            if i == 0 {
+                None
+            } else {
+                self.menu_categories.get(i - 1)
             }
-            KeyCode::Enter => {
-                if let Some(i) = self.menu_state.selected() {
-                    let item = self.menu[i].clone();
-                    if item.with_order {
-                        self.set_status("⚠️ 随单购商品不能单独下单（会按原价结算）", StatusKind::Error);
-                        return Ok(());
-                    }
-                    let store = self.store_code.clone().unwrap_or_default();
-                    self.set_status(format!("正在加载 {} 详情...", item.name), StatusKind::Info);
-                    match fetch_detail(&self.client, &store, &item.code).await {
-                        Ok(detail) => {
-                            if detail.rounds.is_empty() {
-                                // 无轮次，直接加篮
-                                let item_val = json!({"productCode": detail.code, "quantity": 1});
-                                self.add_to_basket(detail.name.clone(), 1, item_val);
-                                self.screen = Screen::Menu;
-                                self.set_status(format!("已加购 {}", detail.name), StatusKind::Info);
-                            } else {
-                                // 进入选餐
-                                self.detail = Some(detail);
-                                self.combo_round = 0;
-                                self.combo_picks = vec![Vec::new(); self.rounds().len()];
-                                self.combo_mods = vec![Vec::new(); self.rounds().len()];
-                                self.init_combo_round();
-                                self.screen = Screen::Combo;
-                            }
+        });
+        self.menu
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                let ok_cat = cat.map(|c| m.category == *c).unwrap_or(true);
+                let ok_search = self.menu_search.is_empty() || m.name.contains(&self.menu_search);
+                ok_cat && ok_search
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    async fn handle_menu(&mut self, code: KeyCode) -> Result<()> {
+        if code == KeyCode::Tab {
+            self.menu_focus = match self.menu_focus {
+                MenuFocus::Search => MenuFocus::Category,
+                MenuFocus::Category => MenuFocus::Items,
+                MenuFocus::Items => MenuFocus::Search,
+            };
+            return Ok(());
+        }
+        match self.menu_focus {
+            MenuFocus::Search => match code {
+                KeyCode::Enter | KeyCode::Esc => self.menu_focus = MenuFocus::Items,
+                KeyCode::Backspace => {
+                    self.menu_search.pop();
+                    self.menu_state.select(Some(0));
+                }
+                KeyCode::Char(c) => {
+                    self.menu_search.push(c);
+                    self.menu_state.select(Some(0));
+                }
+                _ => {}
+            },
+            MenuFocus::Category => match code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    list_prev(&mut self.menu_cat_state, self.menu_categories.len() + 1);
+                    self.menu_state.select(Some(0));
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    list_next(&mut self.menu_cat_state, self.menu_categories.len() + 1);
+                    self.menu_state.select(Some(0));
+                }
+                KeyCode::Enter | KeyCode::Right => self.menu_focus = MenuFocus::Items,
+                KeyCode::Char('b') => self.open_basket(),
+                _ => {}
+            },
+            MenuFocus::Items => {
+                let visible = self.visible_menu();
+                match code {
+                    KeyCode::Up | KeyCode::Char('k') => list_prev(&mut self.menu_state, visible.len()),
+                    KeyCode::Down | KeyCode::Char('j') => list_next(&mut self.menu_state, visible.len()),
+                    KeyCode::Char('b') => self.open_basket(),
+                    KeyCode::Enter => {
+                        let Some(sel) = self.menu_state.selected() else { return Ok(()) };
+                        let Some(&orig_idx) = visible.get(sel) else { return Ok(()) };
+                        let item = self.menu[orig_idx].clone();
+                        if item.with_order {
+                            self.set_status("⚠️ 随单购商品不能单独下单（会按原价结算）", StatusKind::Error);
+                            return Ok(());
                         }
-                        Err(e) => self.set_status(format!("加载详情失败: {e}"), StatusKind::Error),
+                        let store = self.store_code.clone().unwrap_or_default();
+                        self.set_status(format!("正在加载 {} 详情...", item.name), StatusKind::Info);
+                        match fetch_detail(&self.client, &store, &item.code).await {
+                            Ok(detail) => {
+                                if detail.rounds.is_empty() {
+                                    let item_val = json!({"productCode": detail.code, "quantity": 1});
+                                    self.add_to_basket(detail.name.clone(), 1, item_val);
+                                    self.screen = Screen::Menu;
+                                    self.set_status(format!("已加购 {}", detail.name), StatusKind::Info);
+                                } else {
+                                    self.detail = Some(detail);
+                                    self.combo_round = 0;
+                                    self.combo_picks = vec![Vec::new(); self.rounds().len()];
+                                    self.combo_mods = vec![Vec::new(); self.rounds().len()];
+                                    self.init_combo_round();
+                                    self.screen = Screen::Combo;
+                                }
+                            }
+                            Err(e) => self.set_status(format!("加载详情失败: {e}"), StatusKind::Error),
+                        }
                     }
+                    _ => {}
                 }
             }
-            _ => {}
         }
         Ok(())
     }
@@ -552,12 +633,24 @@ impl App {
     }
 
     fn init_combo_round(&mut self) {
-        let round = &self.rounds()[self.combo_round];
-        self.combo_toggle = round
-            .choices
-            .iter()
-            .map(|c| c.quantity > 0 || c.is_default == 1)
-            .collect();
+        let toggle = {
+            let round = &self.rounds()[self.combo_round];
+            let mut toggle: Vec<bool> = round
+                .choices
+                .iter()
+                .map(|c| c.quantity > 0 || c.is_default == 1)
+                .collect();
+            // 单选组（选1~1项）只保留第一个默认选中，避免显示多个 ■
+            if round.min_quantity == 1
+                && round.max_quantity == 1
+                && let Some(first) = toggle.iter().position(|b| *b)
+            {
+                toggle = vec![false; toggle.len()];
+                toggle[first] = true;
+            }
+            toggle
+        };
+        self.combo_toggle = toggle;
         self.combo_state = ListState::default();
         self.combo_state.select(Some(0));
     }
@@ -1064,47 +1157,128 @@ impl App {
     }
 
     fn render_menu(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .menu
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .split(area);
+
+        // 顶部搜索框
+        let search_style = if self.menu_focus == MenuFocus::Search {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let search = Paragraph::new(Line::from(vec![
+            Span::styled("🔍 ", search_style),
+            Span::styled(
+                format!(
+                    "{}{}",
+                    self.menu_search,
+                    if self.menu_focus == MenuFocus::Search {
+                        "▎"
+                    } else {
+                        ""
+                    }
+                ),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled("  Tab 切换", Style::default().fg(Color::DarkGray)),
+        ]))
+        .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(search, chunks[0]);
+
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+            .split(chunks[1]);
+
+        // 左栏：分类
+        let cat_border = if self.menu_focus == MenuFocus::Category {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
+        let mut cat_items = vec![ListItem::new("  全部 ")];
+        for c in &self.menu_categories {
+            cat_items.push(ListItem::new(format!("  {c} ")));
+        }
+        let cat_list = List::new(cat_items)
+            .block(
+                Block::default()
+                    .title(" 分类 ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(cat_border)),
+            )
+            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
+        frame.render_stateful_widget(cat_list, body[0], &mut self.menu_cat_state);
+
+        // 右栏：过滤后的餐品
+        let visible = self.visible_menu();
+        let items_border = if self.menu_focus == MenuFocus::Items {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
+        let items: Vec<ListItem> = visible
             .iter()
-            .map(|m| {
+            .map(|&i| {
+                let m = &self.menu[i];
                 let tag = if m.with_order { " [随单购]" } else { "" };
                 ListItem::new(vec![Line::from(vec![
-                    Span::styled(
-                        format!(" {} ", m.name),
-                        Style::default().fg(Color::White),
-                    ),
-                    Span::styled(
-                        format!("¥{}", m.price),
-                        Style::default().fg(Color::Yellow),
-                    ),
+                    Span::styled(format!(" {} ", m.name), Style::default().fg(Color::White)),
+                    Span::styled(format!("¥{}", m.price), Style::default().fg(Color::Yellow)),
                     Span::styled(tag, Style::default().fg(Color::Magenta)),
-                    Span::styled(
-                        format!("   [{}]", m.category),
-                        Style::default().fg(Color::Gray),
-                    ),
                 ])])
             })
             .collect();
         let list = List::new(items)
-            .block(Block::default().title(format!(
-                " 菜单（{} 件商品） ",
-                self.menu.len()
-            )).borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title(format!(" 餐品（{} 件） ", visible.len()))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(items_border)),
+            )
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
-        frame.render_stateful_widget(list, area, &mut self.menu_state);
+        frame.render_stateful_widget(list, body[1], &mut self.menu_state);
     }
 
     fn render_combo(&mut self, frame: &mut Frame, area: Rect) {
+        // 背景：菜单页
+        self.render_menu(frame, area);
+
+        let popup = centered_rect(62, 72, area);
+        frame.render_widget(Clear, popup);
+
         let detail = match &self.detail {
             Some(d) => d,
             None => {
-                frame.render_widget(Paragraph::new("加载中..."), area);
+                frame.render_widget(
+                    Paragraph::new("加载中...").block(Block::default().borders(Borders::ALL)),
+                    popup,
+                );
                 return;
             }
         };
         let rounds = &detail.rounds;
         let round = &rounds[self.combo_round];
+        let inner = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+            .split(popup);
+
+        let title = format!(
+            " 轮次{}/{}【{}】 选{}~{}项 ",
+            self.combo_round + 1,
+            rounds.len(),
+            round.name,
+            round.min_quantity,
+            round.max_quantity
+        );
+        let hint = if round.max_quantity == 1 && round.min_quantity == 1 {
+            "Enter 选中 · Esc 取消"
+        } else {
+            "空格 切换 · Enter 确认 · Esc 取消"
+        };
         let items: Vec<ListItem> = round
             .choices
             .iter()
@@ -1121,37 +1295,41 @@ impl App {
                 ]))
             })
             .collect();
-        let max = round.max_quantity;
-        let min = round.min_quantity;
-        let title = format!(
-            " 轮次{}/{}【{}】 选{}~{}项 ",
-            self.combo_round + 1,
-            rounds.len(),
-            round.name,
-            min,
-            max
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {} ", detail.name),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))),
+            inner[0],
         );
-        let hint = if max == 1 && min == 1 {
-            "Enter 选中"
-        } else {
-            "空格 切换 · Enter 确认"
-        };
         let p = List::new(items)
             .block(Block::default().title(title).borders(Borders::ALL))
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
-        frame.render_stateful_widget(p, area, &mut self.combo_state);
+        frame.render_stateful_widget(p, inner[1], &mut self.combo_state);
         frame.render_widget(
-            Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray)))
-                .block(Block::default()),
-            Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
+            Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray))),
+            inner[2],
         );
     }
 
     fn render_mods(&mut self, frame: &mut Frame, area: Rect) {
+        // 背景：选餐弹窗
+        self.render_combo(frame, area);
+
+        let popup = centered_rect(48, 48, area);
+        frame.render_widget(Clear, popup);
+
         let Some(g) = self.mods_groups.get(self.mods_group_idx).cloned() else {
-            frame.render_widget(Paragraph::new("特调完成"), area);
+            frame.render_widget(
+                Paragraph::new("特调完成").block(Block::default().borders(Borders::ALL)),
+                popup,
+            );
             return;
         };
+        let inner = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+            .split(popup);
         let items: Vec<ListItem> = g
             .item
             .iter()
@@ -1172,13 +1350,20 @@ impl App {
             .collect();
         let title = format!(" 特调（选{}~{}项） ", g.min, g.max);
         let hint = if g.multi { "空格 切换 · Enter 确认" } else { "↑↓ 选择 · Enter 确认" };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " 特调选项 ",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))),
+            inner[0],
+        );
         let list = List::new(items)
             .block(Block::default().title(title).borders(Borders::ALL))
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
-        frame.render_stateful_widget(list, area, &mut self.mods_state);
+        frame.render_stateful_widget(list, inner[1], &mut self.mods_state);
         frame.render_widget(
             Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray))),
-            Rect::new(area.x, area.y + area.height.saturating_sub(1), area.width, 1),
+            inner[2],
         );
     }
 
@@ -1304,4 +1489,23 @@ fn input_line(label: &str, value: &str, active: bool) -> Vec<Span<'static>> {
         style,
     ));
     spans
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1])[1]
 }
