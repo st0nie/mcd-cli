@@ -142,6 +142,23 @@ mcd-cli order query <ORDER_ID>
 
 The response contains `payH5Url` — a QR-code payment page. The user can also pay via the McDonald's App under "My Orders".
 
+**Chat scenarios — generate a QR image to send (`--qr-save`)**
+
+聊天场景（QQ / 微信 / 网页对话）推荐下单时加 `--qr-save`：命令会把支付二维码落盘成图片，并返回一行路径：
+
+```bash
+mcd-cli order create ... --qr-save
+# 输出里会有一行，例如：
+#   已经保存到 /tmp/mcd-qrcode/<orderId>.png
+```
+
+拿到这行里的绝对路径后，按场景处理：
+
+- 桌面环境：用系统工具打开给用户看，如 macOS `open /tmp/mcd-qrcode/<orderId>.png`、Linux `xdg-open /tmp/mcd-qrcode/<orderId>.png`
+- 聊天机器人：直接把这张 png 作为图片消息发给用户（例如 QQ/微信机器人发图）
+
+`--qr` 则是在终端直接打印字符画二维码，适合用户就在终端前时使用；两者互不冲突。
+
 ## Other features
 
 ```bash
