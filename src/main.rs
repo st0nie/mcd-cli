@@ -309,11 +309,19 @@ enum OrderCommands {
         coupon_code: Option<String>,
         #[arg(long, help = "助餐服务 code（团餐必填）")]
         gm_service_code: Option<String>,
+        #[arg(long, help = "输出支付二维码（默认关闭，交互模式自动开启）")]
+        qr: bool,
+        #[arg(long, help = "二维码落盘为 /tmp/mcd-qrcode/<orderId>.png")]
+        qr_save: bool,
     },
     /// 查询订单
     Query {
         #[arg(help = "订单号 orderId")]
         id: String,
+        #[arg(long, help = "输出支付二维码（默认关闭，交互模式自动开启）")]
+        qr: bool,
+        #[arg(long, help = "二维码落盘为 /tmp/mcd-qrcode/<orderId>.png")]
+        qr_save: bool,
     },
 }
 
@@ -870,6 +878,7 @@ async fn run_select(
 }
 
 async fn interactive_mode(client: &McpClient) -> Result<()> {
+    fmt::set_show_qr(true);
     loop {
         print_divider();
         println!("🍟 麦当劳 CLI 交互模式");
@@ -1474,7 +1483,11 @@ async fn main() -> Result<()> {
                 coupon_id,
                 coupon_code,
                 gm_service_code,
+                qr,
+                qr_save,
             } => {
+                fmt::set_show_qr(qr);
+                fmt::set_show_qr_save(qr_save);
                 run_order_create(
                     &client,
                     &store,
@@ -1491,7 +1504,11 @@ async fn main() -> Result<()> {
                 )
                 .await?
             }
-            OrderCommands::Query { id } => run_order_query(&client, &id).await?,
+            OrderCommands::Query { id, qr, qr_save } => {
+                fmt::set_show_qr(qr);
+                fmt::set_show_qr_save(qr_save);
+                run_order_query(&client, &id).await?
+            }
         },
         Some(Commands::Interactive) | None => {
             println!("🍟 麦当劳 MCP CLI v{}", env!("CARGO_PKG_VERSION"));

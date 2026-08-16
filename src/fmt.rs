@@ -1,13 +1,25 @@
+use image::Rgb;
 use qrcode::{QrCode, render::unicode};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tabled::{builder::Builder, settings::Style};
 use unicode_width::UnicodeWidthStr;
 
 static SHOW_MODS: AtomicBool = AtomicBool::new(false);
+static SHOW_QR: AtomicBool = AtomicBool::new(false);
+static SHOW_QR_SAVE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_show_mods(v: bool) {
     SHOW_MODS.store(v, Ordering::Relaxed);
+}
+
+pub fn set_show_qr(v: bool) {
+    SHOW_QR.store(v, Ordering::Relaxed);
+}
+
+pub fn set_show_qr_save(v: bool) {
+    SHOW_QR_SAVE.store(v, Ordering::Relaxed);
 }
 
 fn pad(s: &str, width: usize) -> String {
@@ -23,6 +35,19 @@ fn render_qr(url: &str) -> Option<String> {
     QrCode::new(url.as_bytes())
         .ok()
         .map(|code| code.render::<unicode::Dense1x2>().quiet_zone(true).build())
+}
+
+fn render_qr_file(url: &str, out_path: &Path) -> Result<(), String> {
+    let code = QrCode::new(url.as_bytes()).map_err(|e| e.to_string())?;
+    let img = code
+        .render::<Rgb<u8>>()
+        .min_dimensions(300, 300)
+        .quiet_zone(true)
+        .build();
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    img.save(out_path).map_err(|e| e.to_string())
 }
 
 fn extract_order_id(url: &str) -> Option<&str> {
@@ -393,13 +418,23 @@ fn format_order(val: &Value) -> String {
         let qr_url = extract_order_id(url)
             .map(|id| format!("https://m.mcd.cn/mcp/jumpToApp?orderId={}", id))
             .unwrap_or_else(|| url.to_string());
-        out.push_str("  📱 扫码支付 (麦当劳APP):\n");
-        if let Some(qr) = render_qr(&qr_url) {
-            for line in qr.lines() {
-                out.push_str(&format!("    {}\n", line));
+        if SHOW_QR.load(Ordering::Relaxed) {
+            out.push_str("  📱 扫码支付 (麦当劳APP):\n");
+            if let Some(qr) = render_qr(&qr_url) {
+                for line in qr.lines() {
+                    out.push_str(&format!("    {}\n", line));
+                }
+            } else {
+                out.push_str("    (无法生成二维码)\n");
             }
-        } else {
-            out.push_str("    (无法生成二维码)\n");
+        }
+        if SHOW_QR_SAVE.load(Ordering::Relaxed) {
+            let order_id = extract_order_id(url).unwrap_or("unknown");
+            let out_path = PathBuf::from(format!("/tmp/mcd-qrcode/{order_id}.png"));
+            match render_qr_file(&qr_url, &out_path) {
+                Ok(()) => out.push_str(&format!("  已经保存到 {}\n", out_path.display())),
+                Err(e) => out.push_str(&format!("  (二维码保存失败: {e})\n")),
+            }
         }
         out.push('\n');
     }
