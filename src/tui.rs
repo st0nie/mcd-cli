@@ -11,9 +11,9 @@ use crossterm::{
     execute,
 };
 use image::Rgb;
-use qrcode::QrCode;
+use qrcode::{QrCode, render::unicode};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -415,6 +415,10 @@ impl App {
 
     async fn handle_key(&mut self, code: KeyCode) -> Result<()> {
         match code {
+            KeyCode::Char('q') if self.screen == Screen::OrderResult => {
+                self.should_exit = true;
+                return Ok(());
+            }
             KeyCode::Char('q') if self.screen != Screen::StoreSearch => {
                 self.go_back();
                 return Ok(());
@@ -440,9 +444,7 @@ impl App {
             Screen::Combo => self.handle_combo(code).await?,
             Screen::Mods => self.handle_mods(code).await?,
             Screen::Price => self.handle_price(code).await?,
-            Screen::OrderResult => {
-                self.should_exit = true;
-            }
+            Screen::OrderResult => {}
         }
         Ok(())
     }
@@ -800,7 +802,7 @@ impl App {
                         self.store_state.select(Some(i));
                     }
                 }
-                Screen::Menu => self.mouse_menu(col, row),
+                Screen::Menu => self.mouse_menu(col, row).await?,
                 Screen::Combo => {
                     let popup = centered_rect(66, 80, content_area(self.last_area));
                     let inner = Layout::default()
@@ -861,11 +863,11 @@ impl App {
         Ok(())
     }
 
-    fn mouse_menu(&mut self, col: u16, row: u16) {
+    async fn mouse_menu(&mut self, col: u16, row: u16) -> Result<()> {
         let area = content_area(self.last_area);
         if row == area.y {
             self.menu_focus = MenuFocus::Search;
-            return;
+            return Ok(());
         }
         let panes = menu_panes(area);
         if col < panes[0].right() {
@@ -890,8 +892,18 @@ impl App {
             }
         } else {
             self.menu_focus = MenuFocus::Basket;
-            self.mouse_basket_select(panes[2], row);
+            let basket_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(panes[2]);
+            if row >= basket_chunks[1].y {
+                // 点击"去结算"按钮
+                self.price_basket().await?;
+            } else {
+                self.mouse_basket_select(panes[2], row);
+            }
         }
+        Ok(())
     }
 
     fn mouse_basket_select(&mut self, list_rect: Rect, row: u16) {
@@ -1582,13 +1594,17 @@ impl App {
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
         frame.render_stateful_widget(list, body[1], &mut self.menu_state);
 
-        // 右栏：购物篮（常驻）
+        // 右栏：购物篮（常驻）+ 底部去结算按钮
         let basket_border = if self.menu_focus == MenuFocus::Basket {
             Color::Yellow
         } else {
             Color::Gray
         };
         let total: u32 = self.basket.iter().map(|b| b.qty).sum();
+        let basket_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(body[2]);
         let basket_block = Block::default()
             .title(format!(" 购物篮（{total} 件） "))
             .borders(Borders::ALL)
@@ -1597,7 +1613,7 @@ impl App {
             let p = Paragraph::new("空，去菜单加购吧\n\n选中购物篮后:\nd 删除 · p 计价 · c 清空")
                 .block(basket_block)
                 .wrap(Wrap { trim: true });
-            frame.render_widget(p, body[2]);
+            frame.render_widget(p, basket_chunks[0]);
         } else {
             let b_items: Vec<ListItem> = self
                 .basket
@@ -1621,8 +1637,18 @@ impl App {
             let blist = List::new(b_items)
                 .block(basket_block)
                 .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
-            frame.render_stateful_widget(blist, body[2], &mut self.basket_state);
+            frame.render_stateful_widget(blist, basket_chunks[0], &mut self.basket_state);
         }
+        // 底部去结算按钮
+        let button = Paragraph::new(Line::from(Span::styled(
+            "  ▶ 去结算 (p)  ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center);
+        frame.render_widget(button, basket_chunks[1]);
     }
 
     fn render_combo(&mut self, frame: &mut Frame, area: Rect) {
@@ -1778,33 +1804,55 @@ impl App {
     }
 
     fn render_order_result(&self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
         let lines = vec![
             Line::from(Span::styled(
                 "🎉 下单成功！",
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             )),
+            Line::from(""),
             Line::from(vec![
                 Span::styled("订单号: ", Style::default().fg(Color::Gray)),
                 Span::styled(self.order_id.clone(), Style::default().fg(Color::Yellow)),
-            ]),
-            Line::from(vec![
-                Span::styled("支付链接: ", Style::default().fg(Color::Gray)),
-                Span::styled(self.order_pay_url.clone(), Style::default().fg(Color::Cyan)),
             ]),
             Line::from(vec![
                 Span::styled("二维码: ", Style::default().fg(Color::Gray)),
                 Span::styled(self.qr_path.clone(), Style::default().fg(Color::Green)),
             ]),
             Line::from(""),
+            Line::from(Span::styled("支付链接:", Style::default().fg(Color::Gray))),
             Line::from(Span::styled(
-                "用麦当劳 APP / 微信扫上面的二维码付款，q 退出",
+                self.order_pay_url.clone(),
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "用 APP / 微信扫码付款，q 退出",
                 Style::default().fg(Color::Gray),
             )),
         ];
         let p = Paragraph::new(lines)
             .wrap(Wrap { trim: true })
             .block(Block::default().title(" 订单 ").borders(Borders::ALL));
-        frame.render_widget(p, area);
+        frame.render_widget(p, chunks[0]);
+
+        // 右：二维码字符画
+        let qr_lines: Vec<Line> = if self.order_pay_url.is_empty() {
+            vec![Line::from("(无二维码)")]
+        } else if let Ok(code) = QrCode::new(self.order_pay_url.as_bytes()) {
+            let qr = code.render::<unicode::Dense1x2>().quiet_zone(true).build();
+            qr.lines()
+                .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::White))))
+                .collect()
+        } else {
+            vec![Line::from("(二维码生成失败)")]
+        };
+        let qr_p = Paragraph::new(qr_lines)
+            .block(Block::default().title(" 扫码支付 ").borders(Borders::ALL));
+        frame.render_widget(qr_p, chunks[1]);
     }
 }
 
