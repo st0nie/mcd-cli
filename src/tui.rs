@@ -3,7 +3,13 @@
 //! 核心点餐链路：门店搜索 → 菜单浏览 → 随心配轮次选配 + 特调 → 购物篮 → 计价 → 下单 → 二维码落盘。
 
 use anyhow::{Context, Result, bail};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEventKind,
+    },
+    execute,
+};
 use image::Rgb;
 use qrcode::QrCode;
 use ratatui::{
@@ -15,8 +21,9 @@ use ratatui::{
 };
 use serde_json::{Value, json};
 use std::time::Duration;
+use unicode_width::UnicodeWidthChar;
 
-use crate::meal::{self, MealDetail, ModSelection, ModValue, Round};
+use crate::meal::{self, Choice, MealDetail, ModSelection, ModValue, Modification, Round};
 use crate::mcp::McpClient;
 
 const ORDER_TYPE: i32 = 1;
@@ -69,6 +76,7 @@ struct BasketItem {
     label: String,
     qty: u32,
     item: Value,
+    detail: String, // 套餐子项 + 特调展示（如 "双层吉士汉堡 + 可乐麦炫酷（去冰）"）
 }
 
 struct PriceInfo {
@@ -108,13 +116,13 @@ pub struct App {
     menu_search: String,
     menu_focus: MenuFocus,
 
-    // 选餐
+    // 选餐（所有轮次一页）
     detail: Option<MealDetail>,
-    combo_round: usize,
-    combo_toggle: Vec<bool>, // 当前轮次各 choice 是否选中
+    combo_toggles: Vec<Vec<bool>>, // 每轮各 choice 是否选中
     combo_state: ListState,
     combo_picks: Vec<Vec<usize>>, // 已确认的每轮选中 indices
     combo_mods: Vec<Vec<Option<ModSelection>>>, // 每轮每个选中 choice 的特调
+    mods_round: usize, // 当前处理特调的轮次
 
     // 特调
     mods_choice_idx: usize, // 当前处理的选中的 choice 序号
@@ -124,6 +132,7 @@ pub struct App {
     mods_single: usize,
     mods_state: ListState,
     mods_values: Vec<Value>, // 当前 choice 累积的 modification values
+    product_mods_active: bool, // true=正在处理单品特调（非套餐 choice 特调）
 
     // 购物篮
     basket: Vec<BasketItem>,
@@ -137,6 +146,9 @@ pub struct App {
     order_id: String,
     order_pay_url: String,
     qr_path: String,
+
+    // 最近一次渲染区域（鼠标定位用）
+    last_area: Rect,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -342,11 +354,11 @@ impl App {
             menu_search: String::new(),
             menu_focus: MenuFocus::Items,
             detail: None,
-            combo_round: 0,
-            combo_toggle: Vec::new(),
+            combo_toggles: Vec::new(),
             combo_state: ListState::default(),
             combo_picks: Vec::new(),
             combo_mods: Vec::new(),
+            mods_round: 0,
             mods_choice_idx: 0,
             mods_groups: Vec::new(),
             mods_group_idx: 0,
@@ -354,6 +366,7 @@ impl App {
             mods_single: 0,
             mods_state: ListState::default(),
             mods_values: Vec::new(),
+            product_mods_active: false,
             basket: Vec::new(),
             basket_state: ListState::default(),
             price: None,
@@ -361,12 +374,15 @@ impl App {
             order_id: String::new(),
             order_pay_url: String::new(),
             qr_path: String::new(),
+            last_area: Rect::default(),
         }
     }
 
     pub async fn run(mut self) -> Result<()> {
         let mut terminal = ratatui::init();
+        execute!(std::io::stdout(), EnableMouseCapture).context("启用鼠标捕获失败")?;
         let res = self.run_loop(&mut terminal).await;
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
         ratatui::restore();
         res
     }
@@ -374,11 +390,17 @@ impl App {
     async fn run_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         while !self.should_exit {
             terminal.draw(|f| self.render(f))?;
-            if event::poll(Duration::from_millis(120))?
-                && let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.handle_key(key.code).await?;
+            if event::poll(Duration::from_millis(120))? {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        self.handle_key(key.code).await?;
+                    }
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse(mouse).await?;
+                    }
+                    Event::Resize(..) => {}
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -428,7 +450,14 @@ impl App {
             Screen::StoreList => Screen::StoreSearch,
             Screen::Menu => Screen::StoreList,
             Screen::Combo => Screen::Menu,
-            Screen::Mods => Screen::Combo,
+            Screen::Mods => {
+                if self.product_mods_active {
+                    self.product_mods_active = false;
+                    Screen::Menu
+                } else {
+                    Screen::Combo
+                }
+            }
             Screen::Price => Screen::Menu,
             Screen::OrderResult => Screen::Menu,
             Screen::StoreSearch => Screen::StoreSearch,
@@ -566,6 +595,27 @@ impl App {
             };
             return Ok(());
         }
+        match code {
+            KeyCode::Right if self.menu_focus != MenuFocus::Search => {
+                self.menu_focus = match self.menu_focus {
+                    MenuFocus::Category => MenuFocus::Items,
+                    MenuFocus::Items => MenuFocus::Basket,
+                    MenuFocus::Basket => MenuFocus::Category,
+                    MenuFocus::Search => MenuFocus::Search,
+                };
+                return Ok(());
+            }
+            KeyCode::Left if self.menu_focus != MenuFocus::Search => {
+                self.menu_focus = match self.menu_focus {
+                    MenuFocus::Category => MenuFocus::Basket,
+                    MenuFocus::Items => MenuFocus::Category,
+                    MenuFocus::Basket => MenuFocus::Items,
+                    MenuFocus::Search => MenuFocus::Search,
+                };
+                return Ok(());
+            }
+            _ => {}
+        }
         match self.menu_focus {
             MenuFocus::Search => match code {
                 KeyCode::Enter | KeyCode::Esc => self.menu_focus = MenuFocus::Items,
@@ -611,16 +661,70 @@ impl App {
                         match fetch_detail(&self.client, &store, &item.code).await {
                             Ok(detail) => {
                                 if detail.rounds.is_empty() {
-                                    let item_val = json!({"productCode": detail.code, "quantity": 1});
-                                    self.add_to_basket(detail.name.clone(), 1, item_val);
-                                    self.screen = Screen::Menu;
-                                    self.set_status(format!("已加购 {}", detail.name), StatusKind::Info);
+                                    // 单品：有特调则进特调流程（如饮料去冰）
+                                    if let Some(modification) = detail.modification.as_ref()
+                                        && !modification.items.is_empty()
+                                    {
+                                        let (groups, auto) = build_mod_groups(modification);
+                                        self.detail = Some(detail);
+                                        self.product_mods_active = true;
+                                        self.mods_values = auto;
+                                        self.mods_groups = groups;
+                                        self.mods_group_idx = 0;
+                                        if self.mods_groups.is_empty() {
+                                            // 全自动特调，直接加篮
+                                            let d = self.detail.take().context("选餐数据缺失")?;
+                                            let sel =
+                                                ModSelection { values: self.mods_values.clone() };
+                                            let names = d
+                                                .modification
+                                                .as_ref()
+                                                .map(|m| mod_names_from_sel(m, &sel))
+                                                .unwrap_or_default();
+                                            let item =
+                                                meal::build_item_value(&d, 1, &[], &[], Some(sel));
+                                            self.product_mods_active = false;
+                                            self.add_to_basket(d.name.clone(), 1, item, names.join(" / "));
+                                            self.screen = Screen::Menu;
+                                            self.set_status(format!("已加购 {}", d.name), StatusKind::Info);
+                                        } else {
+                                            self.init_mods_group();
+                                            self.screen = Screen::Mods;
+                                        }
+                                    } else {
+                                        let item_val =
+                                            json!({"productCode": detail.code, "quantity": 1});
+                                        self.add_to_basket(detail.name.clone(), 1, item_val, String::new());
+                                        self.screen = Screen::Menu;
+                                        self.set_status(format!("已加购 {}", detail.name), StatusKind::Info);
+                                    }
                                 } else {
+                                    let toggles: Vec<Vec<bool>> = detail
+                                        .rounds
+                                        .iter()
+                                        .map(|round| {
+                                            let mut t: Vec<bool> = round
+                                                .choices
+                                                .iter()
+                                                .map(|c| c.quantity > 0 || c.is_default == 1)
+                                                .collect();
+                                            if round.min_quantity == 1
+                                                && round.max_quantity == 1
+                                                && let Some(first) = t.iter().position(|b| *b)
+                                            {
+                                                t = vec![false; t.len()];
+                                                t[first] = true;
+                                            }
+                                            t
+                                        })
+                                        .collect();
+                                    let n = detail.rounds.len();
                                     self.detail = Some(detail);
-                                    self.combo_round = 0;
-                                    self.combo_picks = vec![Vec::new(); self.rounds().len()];
-                                    self.combo_mods = vec![Vec::new(); self.rounds().len()];
-                                    self.init_combo_round();
+                                    self.combo_toggles = toggles;
+                                    self.combo_picks = vec![Vec::new(); n];
+                                    self.combo_mods = vec![Vec::new(); n];
+                                    self.combo_state = ListState::default();
+                                    self.combo_state.select(Some(0));
                                     self.screen = Screen::Combo;
                                 }
                             }
@@ -652,190 +756,319 @@ impl App {
         Ok(())
     }
 
+    async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<()> {
+        let (col, row) = (mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => match self.screen {
+                Screen::StoreSearch => {
+                    let content = content_area(self.last_area);
+                    if row == content.y + 1 {
+                        self.focus = Focus::City;
+                    } else if row == content.y + 2 {
+                        self.focus = Focus::Keyword;
+                    }
+                }
+                Screen::StoreList => {
+                    let popup = centered_rect(72, 82, content_area(self.last_area));
+                    let inner = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                        ])
+                        .split(popup);
+                    if let Some(i) =
+                        list_index_at(inner[1], row, self.store_state.offset(), self.stores.len())
+                    {
+                        self.store_state.select(Some(i));
+                    }
+                }
+                Screen::Menu => self.mouse_menu(col, row),
+                Screen::Combo => {
+                    let popup = centered_rect(66, 80, content_area(self.last_area));
+                    let inner = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                        ])
+                        .split(popup);
+                    if let Some(i) = list_index_at(
+                        inner[1],
+                        row,
+                        self.combo_state.offset(),
+                        self.combo_flat().len(),
+                    ) {
+                        self.combo_state.select(Some(i));
+                    }
+                }
+                Screen::Mods => {
+                    let popup = centered_rect(48, 48, content_area(self.last_area));
+                    let inner = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Length(1),
+                            Constraint::Min(1),
+                            Constraint::Length(1),
+                        ])
+                        .split(popup);
+                    let len = self
+                        .mods_groups
+                        .get(self.mods_group_idx)
+                        .map(|g| g.item.len())
+                        .unwrap_or(0);
+                    if let Some(i) = list_index_at(inner[1], row, self.mods_state.offset(), len) {
+                        self.mods_state.select(Some(i));
+                    }
+                }
+                Screen::Price => {
+                    let area = content_area(self.last_area);
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(8), Constraint::Min(1)])
+                        .split(area);
+                    let n = self.price.as_ref().map(|p| p.take_ways.len()).unwrap_or(0);
+                    if let Some(i) = list_index_at(chunks[1], row, self.takeway_state.offset(), n)
+                    {
+                        self.takeway_state.select(Some(i));
+                    }
+                }
+                Screen::OrderResult => {}
+            },
+            MouseEventKind::ScrollUp => self.mouse_scroll(true),
+            MouseEventKind::ScrollDown => self.mouse_scroll(false),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn mouse_menu(&mut self, col: u16, row: u16) {
+        let area = self.last_area;
+        if row == area.y {
+            self.menu_focus = MenuFocus::Search;
+            return;
+        }
+        let panes = menu_panes(area);
+        if col < panes[0].right() {
+            self.menu_focus = MenuFocus::Category;
+            if let Some(i) = list_index_at(
+                panes[0],
+                row,
+                self.menu_cat_state.offset(),
+                self.menu_categories.len() + 1,
+            ) {
+                self.menu_cat_state.select(Some(i));
+                self.menu_state.select(Some(0));
+            }
+        } else if col < panes[1].right() {
+            self.menu_focus = MenuFocus::Items;
+            let visible = self.visible_menu();
+            if let Some(i) = list_index_at(panes[1], row, self.menu_state.offset(), visible.len())
+            {
+                self.menu_state.select(Some(i));
+            }
+        } else {
+            self.menu_focus = MenuFocus::Basket;
+            if let Some(i) = list_index_at(panes[2], row, self.basket_state.offset(), self.basket.len())
+            {
+                self.basket_state.select(Some(i));
+            }
+        }
+    }
+
+    fn mouse_scroll(&mut self, up: bool) {
+        match self.screen {
+            Screen::Menu => match self.menu_focus {
+                MenuFocus::Category => {
+                    if up {
+                        list_prev(&mut self.menu_cat_state, self.menu_categories.len() + 1);
+                    } else {
+                        list_next(&mut self.menu_cat_state, self.menu_categories.len() + 1);
+                    }
+                }
+                MenuFocus::Items => {
+                    let visible = self.visible_menu();
+                    if up {
+                        list_prev(&mut self.menu_state, visible.len());
+                    } else {
+                        list_next(&mut self.menu_state, visible.len());
+                    }
+                }
+                MenuFocus::Basket => {
+                    if up {
+                        list_prev(&mut self.basket_state, self.basket.len());
+                    } else {
+                        list_next(&mut self.basket_state, self.basket.len());
+                    }
+                }
+                MenuFocus::Search => {}
+            },
+            Screen::StoreList => {
+                if up {
+                    list_prev(&mut self.store_state, self.stores.len());
+                } else {
+                    list_next(&mut self.store_state, self.stores.len());
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn rounds(&self) -> &[Round] {
         self.detail.as_ref().map(|d| d.rounds.as_slice()).unwrap_or(&[])
     }
 
-    fn init_combo_round(&mut self) {
-        let toggle = {
-            let round = &self.rounds()[self.combo_round];
-            let mut toggle: Vec<bool> = round
-                .choices
-                .iter()
-                .map(|c| c.quantity > 0 || c.is_default == 1)
-                .collect();
-            // 单选组（选1~1项）只保留第一个默认选中，避免显示多个 ■
-            if round.min_quantity == 1
-                && round.max_quantity == 1
-                && let Some(first) = toggle.iter().position(|b| *b)
-            {
-                toggle = vec![false; toggle.len()];
-                toggle[first] = true;
+    fn combo_flat(&self) -> Vec<(usize, Option<usize>)> {
+        let mut flat = Vec::new();
+        for (ri, round) in self.rounds().iter().enumerate() {
+            flat.push((ri, None));
+            for ci in 0..round.choices.len() {
+                flat.push((ri, Some(ci)));
             }
-            toggle
-        };
-        self.combo_toggle = toggle;
-        self.combo_state = ListState::default();
-        self.combo_state.select(Some(0));
-    }
-
-    fn combo_round_min(&self) -> i64 {
-        self.rounds().get(self.combo_round).map(|r| r.min_quantity).unwrap_or(1)
-    }
-    fn combo_round_max(&self) -> i64 {
-        self.rounds().get(self.combo_round).map(|r| r.max_quantity).unwrap_or(1)
+        }
+        flat
     }
 
     async fn handle_combo(&mut self, code: KeyCode) -> Result<()> {
         match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                list_prev(&mut self.combo_state, self.combo_toggle.len())
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                list_next(&mut self.combo_state, self.combo_toggle.len())
-            }
-            KeyCode::Char(' ') | KeyCode::Enter => {
+            KeyCode::Up | KeyCode::Char('k') => self.combo_move(true),
+            KeyCode::Down | KeyCode::Char('j') => self.combo_move(false),
+            KeyCode::Char(' ') => {
                 let i = self.combo_state.selected().unwrap_or(0);
-                let min = self.combo_round_min();
-                let max = self.combo_round_max();
-                if max == 1 && min == 1 {
-                    // 单选，直接选中并推进
-                    self.combo_toggle = vec![false; self.combo_toggle.len()];
-                    self.combo_toggle[i] = true;
-                    self.confirm_combo_round().await?;
-                } else {
-                    // 多选：空格切换，Enter 确认
-                    if code == KeyCode::Char(' ') {
-                        let selected: i64 = self
-                            .combo_toggle
-                            .iter()
-                            .filter(|b| **b)
-                            .count()
-                            .try_into()
-                            .unwrap_or(0);
-                        if self.combo_toggle[i] || selected < max {
-                            self.combo_toggle[i] = !self.combo_toggle[i];
-                            // 若超过 max，取消最老的一个选中
-                            let mut cur: i64 = self
-                                .combo_toggle
-                                .iter()
-                                .filter(|b| **b)
-                                .count()
-                                .try_into()
-                                .unwrap_or(0);
-                            while cur > max {
-                                if let Some(pos) = self.combo_toggle.iter().position(|b| *b) {
-                                    self.combo_toggle[pos] = false;
-                                }
-                                cur -= 1;
-                            }
-                        }
-                    } else {
-                        // Enter 确认
-                        let selected: i64 = self
-                            .combo_toggle
-                            .iter()
-                            .filter(|b| **b)
-                            .count()
-                            .try_into()
-                            .unwrap_or(0);
-                        if selected < min || selected > max {
-                            self.set_status(
-                                format!("请选择 {min}~{max} 项"),
-                                StatusKind::Error,
-                            );
-                            return Ok(());
-                        }
-                        self.confirm_combo_round().await?;
+                if let Some((ri, Some(ci))) = self.combo_flat().get(i).copied() {
+                    self.combo_toggle_choice(ri, ci);
+                }
+            }
+            KeyCode::Enter => {
+                let i = self.combo_state.selected().unwrap_or(0);
+                if let Some((ri, Some(ci))) = self.combo_flat().get(i).copied() {
+                    let round = &self.rounds()[ri];
+                    if round.min_quantity == 1 && round.max_quantity == 1 {
+                        self.combo_toggle_choice(ri, ci);
                     }
                 }
+            }
+            KeyCode::Char('o') => {
+                self.combo_done().await?;
             }
             _ => {}
         }
         Ok(())
     }
 
-    async fn confirm_combo_round(&mut self) -> Result<()> {
-        let round_idx = self.combo_round;
-        let picks: Vec<usize> = self
-            .combo_toggle
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| **b)
-            .map(|(i, _)| i)
-            .collect();
-        self.combo_picks[round_idx] = picks;
-
-        // 收集本轮选中 choice 中需要交互的特调 group
-        self.mods_choice_idx = 0;
-        self.combo_mods[round_idx] = vec![None; self.combo_picks[round_idx].len()];
-        self.process_next_mods_choice(round_idx).await
+    fn combo_move(&mut self, up: bool) {
+        let flat = self.combo_flat();
+        if flat.is_empty() {
+            return;
+        }
+        let mut i = self.combo_state.selected().unwrap_or(0);
+        for _ in 0..flat.len() {
+            if up {
+                i = if i == 0 { flat.len() - 1 } else { i - 1 };
+            } else {
+                i = (i + 1) % flat.len();
+            }
+            if flat[i].1.is_some() {
+                break;
+            }
+        }
+        self.combo_state.select(Some(i));
     }
 
-    async fn process_next_mods_choice(&mut self, round_idx: usize) -> Result<()> {
-        if !self.screen_is_combo_ctx() {
-            return Ok(());
-        }
-        // 找下一个有特调的选中 choice
-        loop {
-            let picks = self.combo_picks[round_idx].clone();
-            if self.mods_choice_idx >= picks.len() {
-                // 本轮所有 choice 处理完，进入下一轮或加篮
-                return self.finish_combo_round_or_add(round_idx).await;
+    fn combo_toggle_choice(&mut self, ri: usize, ci: usize) {
+        let round = &self.rounds()[ri];
+        let min = round.min_quantity;
+        let max = round.max_quantity;
+        if min == 1 && max == 1 {
+            for t in self.combo_toggles[ri].iter_mut() {
+                *t = false;
             }
-            let choice_idx = picks[self.mods_choice_idx];
-            let choice = &self.rounds()[round_idx].choices[choice_idx];
-            match &choice.modification {
-                Some(modification) if !modification.items.is_empty() => {
-                    // 构建 group 列表
-                    let mut groups: Vec<ModGroup> = Vec::new();
-                    let mut auto: Vec<Value> = Vec::new();
-                    for item in &modification.items {
-                        if item.values.is_empty() {
+            self.combo_toggles[ri][ci] = true;
+        } else {
+            let selected = self.combo_toggles[ri].iter().filter(|b| **b).count() as i64;
+            if self.combo_toggles[ri][ci] || selected < max {
+                self.combo_toggles[ri][ci] = !self.combo_toggles[ri][ci];
+            }
+        }
+    }
+
+    async fn combo_done(&mut self) -> Result<()> {
+        for (ri, round) in self.rounds().iter().enumerate() {
+            let n = self.combo_toggles[ri].iter().filter(|b| **b).count() as i64;
+            if n < round.min_quantity || n > round.max_quantity {
+                self.set_status(
+                    format!(
+                        "轮次{}【{}】请选择 {}~{} 项",
+                        ri + 1,
+                        round.name,
+                        round.min_quantity,
+                        round.max_quantity
+                    ),
+                    StatusKind::Error,
+                );
+                return Ok(());
+            }
+        }
+        // 构建 picks
+        self.combo_picks = self
+            .combo_toggles
+            .iter()
+            .map(|t| {
+                t.iter()
+                    .enumerate()
+                    .filter(|(_, b)| **b)
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .collect();
+        self.combo_mods = self
+            .combo_picks
+            .iter()
+            .map(|p| vec![None; p.len()])
+            .collect();
+        self.mods_round = 0;
+        self.mods_choice_idx = 0;
+        self.screen = Screen::Combo;
+        self.advance_mods().await
+    }
+
+    async fn advance_mods(&mut self) -> Result<()> {
+        loop {
+            let picks = self.combo_picks[self.mods_round].clone();
+            if self.mods_choice_idx < picks.len() {
+                let choice_idx = picks[self.mods_choice_idx];
+                let choice = &self.rounds()[self.mods_round].choices[choice_idx];
+                match &choice.modification {
+                    Some(modification) if !modification.items.is_empty() => {
+                        let (groups, auto) = build_mod_groups(modification);
+                        self.mods_values = auto;
+                        self.mods_groups = groups;
+                        self.mods_group_idx = 0;
+                        if self.mods_groups.is_empty() {
+                            self.combo_mods[self.mods_round][self.mods_choice_idx] =
+                                Some(ModSelection { values: self.mods_values.clone() });
+                            self.mods_choice_idx += 1;
                             continue;
                         }
-                        let multi = item
-                            .values
-                            .iter()
-                            .all(|v| v.unselected_key.is_some());
-                        if item.min_values == 1
-                            && item.max_values == 1
-                            && item.values.len() == 1
-                        {
-                            let v = &item.values[0];
-                            auto.push(json!({"code": v.code, "key": v.selected_key, "quantity": 1}));
-                        } else {
-                            groups.push(ModGroup {
-                                item: item.values.clone(),
-                                min: item.min_values,
-                                max: item.max_values,
-                                multi,
-                            });
-                        }
+                        self.init_mods_group();
+                        self.screen = Screen::Mods;
+                        return Ok(());
                     }
-                    self.mods_values = auto;
-                    self.mods_groups = groups;
-                    self.mods_group_idx = 0;
-                    if self.mods_groups.is_empty() {
-                        // 全自动，直接记录
-                        self.combo_mods[round_idx][self.mods_choice_idx] =
-                            Some(ModSelection { values: self.mods_values.clone() });
+                    _ => {
                         self.mods_choice_idx += 1;
-                        continue;
                     }
-                    self.init_mods_group();
-                    self.screen = Screen::Mods;
-                    return Ok(());
                 }
-                _ => {
-                    self.mods_choice_idx += 1;
+            } else {
+                // 本轮所有选中 choice 处理完，进入下一轮
+                self.mods_round += 1;
+                self.mods_choice_idx = 0;
+                if self.mods_round >= self.rounds().len() {
+                    return self.finish_add_combo().await;
                 }
             }
         }
-    }
-
-    fn screen_is_combo_ctx(&self) -> bool {
-        true
     }
 
     fn init_mods_group(&mut self) {
@@ -903,14 +1136,28 @@ impl App {
                 self.mods_group_idx += 1;
                 if self.mods_group_idx < self.mods_groups.len() {
                     self.init_mods_group();
+                } else if self.product_mods_active {
+                    // 单品特调完成，加篮
+                    let detail = self.detail.take().context("选餐数据缺失")?;
+                    let sel = ModSelection { values: self.mods_values.clone() };
+                    let names = detail
+                        .modification
+                        .as_ref()
+                        .map(|m| mod_names_from_sel(m, &sel))
+                        .unwrap_or_default();
+                    let item = meal::build_item_value(&detail, 1, &[], &[], Some(sel));
+                    self.product_mods_active = false;
+                    self.add_to_basket(detail.name.clone(), 1, item, names.join(" / "));
+                    self.screen = Screen::Menu;
+                    self.set_status(format!("已加购 {}", detail.name), StatusKind::Info);
                 } else {
-                    // 当前 choice 特调完成
-                    let round_idx = self.combo_round;
+                    // 当前 choice 特调完成，继续下一个
+                    let round_idx = self.mods_round;
                     self.combo_mods[round_idx][self.mods_choice_idx] =
                         Some(ModSelection { values: self.mods_values.clone() });
                     self.mods_choice_idx += 1;
                     self.screen = Screen::Combo;
-                    self.process_next_mods_choice(round_idx).await?;
+                    self.advance_mods().await?;
                 }
             }
             _ => {}
@@ -918,33 +1165,18 @@ impl App {
         Ok(())
     }
 
-    async fn finish_combo_round_or_add(&mut self, round_idx: usize) -> Result<()> {
-        let total = self.rounds().len();
-        if round_idx + 1 < total {
-            self.combo_round = round_idx + 1;
-            self.init_combo_round();
-            self.screen = Screen::Combo;
-            self.set_status(
-                format!(
-                    "轮次 {}/{}：{}",
-                    self.combo_round + 1,
-                    total,
-                    self.rounds()[self.combo_round].name
-                ),
-                StatusKind::Info,
-            );
-            return Ok(());
-        }
-        // 生成 item 加入购物篮
+    async fn finish_add_combo(&mut self) -> Result<()> {
+        // 所有轮次选配+特调完成，生成 item 加入购物篮
         let detail = self.detail.take().context("选餐数据缺失")?;
         let item = meal::build_item_value(&detail, 1, &self.combo_picks, &self.combo_mods, None);
-        self.add_to_basket(detail.name.clone(), 1, item);
+        let sub = Self::combo_sub_lines(&detail, &self.combo_picks, &self.combo_mods);
+        self.add_to_basket(detail.name.clone(), 1, item, sub.join(" + "));
         self.screen = Screen::Menu;
         self.set_status(format!("已加购 {}", detail.name), StatusKind::Info);
         Ok(())
     }
 
-    fn add_to_basket(&mut self, label: String, qty: u32, item: Value) {
+    fn add_to_basket(&mut self, label: String, qty: u32, item: Value, detail: String) {
         // 合并相同 label
         if let Some(b) = self.basket.iter_mut().find(|b| b.label == label) {
             b.qty += qty;
@@ -952,8 +1184,32 @@ impl App {
                 b.item["quantity"] = json!(n + qty as u64);
             }
         } else {
-            self.basket.push(BasketItem { label, qty, item });
+            self.basket.push(BasketItem { label, qty, item, detail });
         }
+    }
+
+    fn combo_sub_lines(
+        detail: &MealDetail,
+        picks: &[Vec<usize>],
+        mods: &[Vec<Option<ModSelection>>],
+    ) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (ri, round) in detail.rounds.iter().enumerate() {
+            let Some(round_picks) = picks.get(ri) else { continue };
+            for (pi, &ci) in round_picks.iter().enumerate() {
+                if let Some(choice) = round.choices.get(ci) {
+                    let mut line = choice.name.clone();
+                    if let Some(Some(sel)) = mods.get(ri).and_then(|m| m.get(pi)) {
+                        let names = mod_names(choice, sel);
+                        if !names.is_empty() {
+                            line.push_str(&format!("（{}）", names.join(" / ")));
+                        }
+                    }
+                    lines.push(line);
+                }
+            }
+        }
+        lines
     }
 
     async fn price_basket(&mut self) -> Result<()> {
@@ -1056,12 +1312,13 @@ fn save_qr(url: &str, order_id: &str) -> Result<String, String> {
 impl App {
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        self.last_area = area;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
                 Constraint::Min(1),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(area);
 
@@ -1099,12 +1356,39 @@ impl App {
     }
 
     fn render_status(&self, frame: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area);
+        let hint = Paragraph::new(Span::styled(
+            self.current_hint(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        frame.render_widget(hint, chunks[0]);
         let color = match self.status_kind {
             StatusKind::Info => Color::Gray,
             StatusKind::Error => Color::Red,
         };
-        let p = Paragraph::new(Span::styled(self.status.clone(), Style::default().fg(color)));
-        frame.render_widget(p, area);
+        let msg = truncate_width(&self.status, chunks[1].width as usize);
+        let p = Paragraph::new(Span::styled(msg, Style::default().fg(color)));
+        frame.render_widget(p, chunks[1]);
+    }
+
+    fn current_hint(&self) -> String {
+        match self.screen {
+            Screen::StoreSearch => "Tab 切换输入 · Enter 搜索 · q 退出".to_string(),
+            Screen::StoreList => "↑↓/鼠标 选择 · Enter 进入菜单 · Esc 返回".to_string(),
+            Screen::Menu => match self.menu_focus {
+                MenuFocus::Search => "输入过滤 · Enter 确认 · Esc 退出搜索".to_string(),
+                MenuFocus::Category => "↑↓ 选分类 · Enter/→ 到餐品 · ←→/Tab 切栏".to_string(),
+                MenuFocus::Items => "↑↓ 选餐品 · Enter 加购 · Tab/←→ 切栏".to_string(),
+                MenuFocus::Basket => "↑↓ 选择 · d 删除 · p 计价 · c 清空".to_string(),
+            },
+            Screen::Combo => "空格 选/切 · o 完成选餐 · Esc 取消".to_string(),
+            Screen::Mods => "空格 切换 · Enter 确认 · Esc 取消".to_string(),
+            Screen::Price => "↑↓ 选取餐方式 · Enter 下单 · Esc 返回".to_string(),
+            Screen::OrderResult => "q 退出".to_string(),
+        }
     }
 
     fn render_store_search(&self, frame: &mut Frame, area: Rect) {
@@ -1124,6 +1408,15 @@ impl App {
     }
 
     fn render_store_list(&mut self, frame: &mut Frame, area: Rect) {
+        // 背景：门店搜索页
+        self.render_store_search(frame, area);
+
+        let popup = centered_rect(72, 82, area);
+        frame.render_widget(Clear, popup);
+        let inner = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
+            .split(popup);
         let items: Vec<ListItem> = self
             .stores
             .iter()
@@ -1140,41 +1433,74 @@ impl App {
                 ])
             })
             .collect();
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" 找到 {} 家门店", self.stores.len()),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))),
+            inner[0],
+        );
         let list = List::new(items)
             .block(Block::default().title(" 选择门店 ").borders(Borders::ALL))
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
-        frame.render_stateful_widget(list, area, &mut self.store_state);
+        frame.render_stateful_widget(list, inner[1], &mut self.store_state);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "↑↓ 选择 · Enter 进入菜单 · Esc 返回",
+                Style::default().fg(Color::Gray),
+            )),
+            inner[2],
+        );
     }
 
     fn render_menu(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .constraints([Constraint::Length(5), Constraint::Min(1)])
             .split(area);
 
-        // 顶部搜索框
+        // 顶部搜索框（3 行内容 + 边框，醒目）
         let search_style = if self.menu_focus == MenuFocus::Search {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
-        let search = Paragraph::new(Line::from(vec![
-            Span::styled("🔍 ", search_style),
-            Span::styled(
-                format!(
-                    "{}{}",
-                    self.menu_search,
-                    if self.menu_focus == MenuFocus::Search {
-                        "▎"
-                    } else {
-                        ""
-                    }
+        let input_style = if self.menu_focus == MenuFocus::Search {
+            Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let search = Paragraph::new(vec![
+            Line::from(Span::styled(
+                "  🔍 搜索菜单",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!(
+                        "{}{}",
+                        self.menu_search,
+                        if self.menu_focus == MenuFocus::Search {
+                            "▎"
+                        } else {
+                            ""
+                        }
+                    ),
+                    input_style,
                 ),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled("  Tab 切换", Style::default().fg(Color::DarkGray)),
-        ]))
-        .block(Block::default().borders(Borders::ALL));
+            ]),
+            Line::from(Span::styled(
+                "  输入实时过滤 · Enter 确认 · Tab/←→ 切换栏",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ])
+        .block(
+            Block::default()
+                .title(" 搜索 ")
+                .borders(Borders::ALL)
+                .border_style(search_style),
+        );
         frame.render_widget(search, chunks[0]);
 
         let body = Layout::default()
@@ -1256,10 +1582,19 @@ impl App {
                 .basket
                 .iter()
                 .map(|b| {
-                    ListItem::new(Line::from(vec![
+                    let mut lines = vec![Line::from(vec![
                         Span::styled(format!(" {} ", b.label), Style::default().fg(Color::White)),
                         Span::styled(format!("x{}", b.qty), Style::default().fg(Color::Yellow)),
-                    ]))
+                    ])];
+                    if !b.detail.is_empty() {
+                        for sub in b.detail.split(" + ") {
+                            lines.push(Line::from(Span::styled(
+                                format!("   · {sub}"),
+                                Style::default().fg(Color::Gray),
+                            )));
+                        }
+                    }
+                    ListItem::new(lines)
                 })
                 .collect();
             let blist = List::new(b_items)
@@ -1273,7 +1608,7 @@ impl App {
         // 背景：菜单页
         self.render_menu(frame, area);
 
-        let popup = centered_rect(62, 72, area);
+        let popup = centered_rect(66, 80, area);
         frame.render_widget(Clear, popup);
 
         let detail = match &self.detail {
@@ -1287,39 +1622,38 @@ impl App {
             }
         };
         let rounds = &detail.rounds;
-        let round = &rounds[self.combo_round];
         let inner = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
             .split(popup);
 
-        let title = format!(
-            " 轮次{}/{}【{}】 选{}~{}项 ",
-            self.combo_round + 1,
-            rounds.len(),
-            round.name,
-            round.min_quantity,
-            round.max_quantity
-        );
-        let hint = if round.max_quantity == 1 && round.min_quantity == 1 {
-            "Enter 选中 · Esc 取消"
-        } else {
-            "空格 切换 · Enter 确认 · Esc 取消"
-        };
-        let items: Vec<ListItem> = round
-            .choices
+        let flat = self.combo_flat();
+        let items: Vec<ListItem> = flat
             .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let mark = if self.combo_toggle[i] { "■ " } else { "□ " };
-                let price = c.diff_price.as_deref().unwrap_or("");
-                let modify = if c.support_modify { " [可特调]" } else { "" };
-                ListItem::new(Line::from(vec![
-                    Span::styled(mark, Style::default().fg(Color::Green)),
-                    Span::styled(c.name.clone(), Style::default().fg(Color::White)),
-                    Span::styled(format!(" {price}"), Style::default().fg(Color::Yellow)),
-                    Span::styled(modify, Style::default().fg(Color::Cyan)),
-                ]))
+            .map(|(ri, ci)| match ci {
+                None => ListItem::new(Line::from(Span::styled(
+                    format!(
+                        "  ── 轮次{}/{}【{}】 选{}~{}项 ──",
+                        ri + 1,
+                        rounds.len(),
+                        rounds[*ri].name,
+                        rounds[*ri].min_quantity,
+                        rounds[*ri].max_quantity
+                    ),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ))),
+                Some(ci) => {
+                    let choice = &rounds[*ri].choices[*ci];
+                    let mark = if self.combo_toggles[*ri][*ci] { "■ " } else { "□ " };
+                    let price = choice.diff_price.as_deref().unwrap_or("");
+                    let modify = if choice.support_modify { " [可特调]" } else { "" };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(mark, Style::default().fg(Color::Green)),
+                        Span::styled(choice.name.clone(), Style::default().fg(Color::White)),
+                        Span::styled(format!(" {price}"), Style::default().fg(Color::Yellow)),
+                        Span::styled(modify, Style::default().fg(Color::Cyan)),
+                    ]))
+                }
             })
             .collect();
         frame.render_widget(
@@ -1330,11 +1664,14 @@ impl App {
             inner[0],
         );
         let p = List::new(items)
-            .block(Block::default().title(title).borders(Borders::ALL))
+            .block(Block::default().title(" 选配（所有轮次） ").borders(Borders::ALL))
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
         frame.render_stateful_widget(p, inner[1], &mut self.combo_state);
         frame.render_widget(
-            Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray))),
+            Paragraph::new(Span::styled(
+                "空格 选/切 · Enter 单选 · o 完成选餐 · Esc 取消",
+                Style::default().fg(Color::Gray),
+            )),
             inner[2],
         );
     }
@@ -1487,6 +1824,122 @@ fn input_line(label: &str, value: &str, active: bool) -> Vec<Span<'static>> {
         style,
     ));
     spans
+}
+
+fn build_mod_groups(modification: &Modification) -> (Vec<ModGroup>, Vec<Value>) {
+    let mut groups: Vec<ModGroup> = Vec::new();
+    let mut auto: Vec<Value> = Vec::new();
+    for item in &modification.items {
+        if item.values.is_empty() {
+            continue;
+        }
+        let multi = item.values.iter().all(|v| v.unselected_key.is_some());
+        if item.min_values == 1 && item.max_values == 1 && item.values.len() == 1 {
+            let v = &item.values[0];
+            auto.push(json!({"code": v.code, "key": v.selected_key, "quantity": 1}));
+        } else {
+            groups.push(ModGroup {
+                item: item.values.clone(),
+                min: item.min_values,
+                max: item.max_values,
+                multi,
+            });
+        }
+    }
+    (groups, auto)
+}
+
+fn mod_names_from_sel(modification: &Modification, sel: &ModSelection) -> Vec<String> {
+    modification
+        .items
+        .iter()
+        .flat_map(|item| &item.values)
+        .filter(|v| {
+            sel.values.iter().any(|sv| {
+                sv.get("code").and_then(Value::as_str) == Some(v.code.as_str())
+                    && sv.get("key").and_then(Value::as_str) == Some(v.selected_key.as_str())
+            })
+        })
+        .map(|v| v.name.clone())
+        .collect()
+}
+
+fn mod_names(choice: &Choice, sel: &ModSelection) -> Vec<String> {
+    choice
+        .modification
+        .as_ref()
+        .map(|m| {
+            m.items
+                .iter()
+                .flat_map(|item| &item.values)
+                .filter(|v| {
+                    sel.values.iter().any(|sv| {
+                        sv.get("code").and_then(Value::as_str) == Some(v.code.as_str())
+                            && sv.get("key").and_then(Value::as_str) == Some(v.selected_key.as_str())
+                    })
+                })
+                .map(|v| v.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn content_area(area: Rect) -> Rect {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(2),
+        ])
+        .split(area);
+    chunks[1]
+}
+
+fn menu_panes(area: Rect) -> [Rect; 3] {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(1)])
+        .split(area);
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(22),
+            Constraint::Percentage(48),
+            Constraint::Percentage(30),
+        ])
+        .split(chunks[1]);
+    [body[0], body[1], body[2]]
+}
+
+fn list_index_at(list_rect: Rect, row: u16, offset: usize, len: usize) -> Option<usize> {
+    if row < list_rect.y + 1 {
+        return None;
+    }
+    let idx = (row - list_rect.y - 1) as usize + offset;
+    if idx < len {
+        Some(idx)
+    } else {
+        None
+    }
+}
+
+fn truncate_width(s: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(1);
+        if w + cw > width {
+            out.push('…');
+            return out;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
