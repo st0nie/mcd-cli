@@ -757,7 +757,9 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<()> {
-        let (col, row) = (mouse.column, mouse.row);
+        // crossterm 鼠标坐标是 1-based，ratatui Rect 是 0-based，减 1 对齐
+        let col = mouse.column.saturating_sub(1);
+        let row = mouse.row.saturating_sub(1);
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => match self.screen {
                 Screen::StoreSearch => {
