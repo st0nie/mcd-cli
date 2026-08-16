@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use anyhow::{Result, anyhow};
+use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -116,7 +116,11 @@ impl McpClient {
         Ok(headers)
     }
 
-    async fn request<T: Serialize, R: for<'de> Deserialize<'de>>(&self, method: &str, params: T) -> Result<R> {
+    async fn request<T: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        method: &str,
+        params: T,
+    ) -> Result<R> {
         let id = self.next_id();
         let req_body = JsonRpcRequest {
             jsonrpc: "2.0",
@@ -170,4 +174,3 @@ impl McpClient {
         self.request("tools/call", params).await
     }
 }
-

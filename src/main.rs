@@ -1,6 +1,7 @@
 mod config;
 mod fmt;
 mod mcp;
+mod meal;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -16,7 +17,12 @@ struct Cli {
     #[arg(long, env = "MCD_MCP_TOKEN", help = "MCP Token")]
     token: Option<String>,
 
-    #[arg(long, env = "MCD_MCP_URL", default_value = "https://mcp.mcd.cn", help = "MCP Server URL")]
+    #[arg(
+        long,
+        env = "MCD_MCP_URL",
+        default_value = "https://mcp.mcd.cn",
+        help = "MCP Server URL"
+    )]
     url: String,
 
     #[command(subcommand)]
@@ -75,7 +81,11 @@ enum Commands {
         be: Option<String>,
         #[arg(long, default_value = "1", help = "订单类型: 1=到店取餐, 2=外送")]
         order_type: i32,
-        #[arg(long, default_value = "1", help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐")]
+        #[arg(
+            long,
+            default_value = "1",
+            help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐"
+        )]
         be_type: i32,
         #[arg(long, help = "预约时间，格式 yyyy-MM-dd HH:mm")]
         reservation_date: Option<String>,
@@ -90,10 +100,41 @@ enum Commands {
         be: Option<String>,
         #[arg(long, default_value = "1", help = "订单类型: 1=到店取餐, 2=外送")]
         order_type: i32,
-        #[arg(long, default_value = "1", help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐")]
+        #[arg(
+            long,
+            default_value = "1",
+            help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐"
+        )]
         be_type: i32,
         #[arg(long, help = "预约时间，格式 yyyy-MM-dd HH:mm")]
         reservation_date: Option<String>,
+        #[arg(long, help = "展开特调选项")]
+        mods: bool,
+    },
+    /// 选餐定制（选配+特调，生成下单 items JSON）
+    Select {
+        #[arg(help = "商品 code")]
+        code: String,
+        #[arg(long, help = "门店 storeCode")]
+        store: String,
+        #[arg(long, help = "门店 beCode（外送必填）")]
+        be: Option<String>,
+        #[arg(long, default_value = "1", help = "订单类型: 1=到店取餐, 2=外送")]
+        order_type: i32,
+        #[arg(
+            long,
+            default_value = "1",
+            help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐"
+        )]
+        be_type: i32,
+        #[arg(long, help = "预约时间，格式 yyyy-MM-dd HH:mm")]
+        reservation_date: Option<String>,
+        #[arg(long, default_value = "1", help = "数量")]
+        qty: u32,
+        #[arg(long, help = "非交互选配，格式 1=1600,2=3050（轮次序号=商品code）")]
+        pick: Option<String>,
+        #[arg(long, help = "只输出 items JSON 到 stdout（供管道使用）")]
+        json: bool,
     },
     /// 优惠券
     Coupon {
@@ -113,7 +154,11 @@ enum Commands {
         be: Option<String>,
         #[arg(long, default_value = "1", help = "订单类型: 1=到店取餐, 2=外送")]
         order_type: i32,
-        #[arg(long, default_value = "1", help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐")]
+        #[arg(
+            long,
+            default_value = "1",
+            help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐"
+        )]
         be_type: i32,
         #[arg(long, help = "预约时间，格式 yyyy-MM-dd HH:mm")]
         reservation_date: Option<String>,
@@ -121,7 +166,10 @@ enum Commands {
         coupon_id: Option<String>,
         #[arg(long, help = "优惠券编码")]
         coupon_code: Option<String>,
-        #[arg(long, help = "商品列表 JSON，如 [{\"productCode\":\"xxx\",\"quantity\":1}]")]
+        #[arg(
+            long,
+            help = "商品列表 JSON，如 [{\"productCode\":\"xxx\",\"quantity\":1}]"
+        )]
         items: String,
     },
     /// 创建订单
@@ -166,7 +214,11 @@ enum CouponCommands {
         be: String,
         #[arg(long, default_value = "1", help = "订单类型: 1=到店取餐, 2=外送")]
         order_type: i32,
-        #[arg(long, default_value = "1", help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐")]
+        #[arg(
+            long,
+            default_value = "1",
+            help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐"
+        )]
         be_type: i32,
         #[arg(long, help = "预约时间，格式 yyyy-MM-dd HH:mm")]
         reservation_date: Option<String>,
@@ -206,7 +258,11 @@ enum MallCommands {
         count: i32,
         #[arg(long, help = "配送地址 ID")]
         address_id: String,
-        #[arg(long, default_value = "2", help = "spuCategory: 1=虚拟商品, 2=实体物品")]
+        #[arg(
+            long,
+            default_value = "2",
+            help = "spuCategory: 1=虚拟商品, 2=实体物品"
+        )]
         spu_category: String,
     },
     /// 商城订单查询
@@ -237,7 +293,11 @@ enum OrderCommands {
         items: String,
         #[arg(long, default_value = "1", help = "订单类型: 1=到店取餐, 2=外送")]
         order_type: i32,
-        #[arg(long, default_value = "1", help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐")]
+        #[arg(
+            long,
+            default_value = "1",
+            help = "业务类型: 1=到店取餐, 2=麦乐送, 5=得来速, 6=团餐"
+        )]
         be_type: i32,
         #[arg(long, help = "取餐方式编码（到店/得来速必填，从 price 获取）")]
         take_way: Option<String>,
@@ -267,11 +327,7 @@ fn read_line(prompt: &str) -> Result<String> {
 
 fn read_line_opt(prompt: &str) -> Option<String> {
     let s = read_line(prompt).ok()?;
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn print_divider() {
@@ -297,24 +353,33 @@ async fn run_init(client: &McpClient) -> Result<()> {
     let result = client.initialize().await?;
     println!("✅ 连接成功!");
     println!("   协议版本: {}", result.protocol_version);
-    println!("   服务端: {} v{}", result.server_info.name, result.server_info.version);
+    println!(
+        "   服务端: {} v{}",
+        result.server_info.name, result.server_info.version
+    );
     Ok(())
 }
 
 async fn run_calendar(client: &McpClient) -> Result<()> {
-    let result = client.call_tool("campaign-calendar", serde_json::json!({})).await?;
+    let result = client
+        .call_tool("campaign-calendar", serde_json::json!({}))
+        .await?;
     print_result(&result);
     Ok(())
 }
 
 async fn run_time(client: &McpClient) -> Result<()> {
-    let result = client.call_tool("now-time-info", serde_json::json!({})).await?;
+    let result = client
+        .call_tool("now-time-info", serde_json::json!({}))
+        .await?;
     print_result(&result);
     Ok(())
 }
 
 async fn run_account(client: &McpClient) -> Result<()> {
-    let result = client.call_tool("query-my-account", serde_json::json!({})).await?;
+    let result = client
+        .call_tool("query-my-account", serde_json::json!({}))
+        .await?;
     print_result(&result);
     Ok(())
 }
@@ -343,7 +408,10 @@ async fn run_nearby(
 
 async fn run_address_list(client: &McpClient, be_type: i32) -> Result<()> {
     let result = client
-        .call_tool("delivery-query-addresses", serde_json::json!({"beType": be_type}))
+        .call_tool(
+            "delivery-query-addresses",
+            serde_json::json!({"beType": be_type}),
+        )
         .await?;
     print_result(&result);
     Ok(())
@@ -406,7 +474,9 @@ async fn run_catering(
 }
 
 async fn run_nutrition(client: &McpClient) -> Result<()> {
-    let result = client.call_tool("list-nutrition-foods", serde_json::json!({})).await?;
+    let result = client
+        .call_tool("list-nutrition-foods", serde_json::json!({}))
+        .await?;
     print_result(&result);
     Ok(())
 }
@@ -484,19 +554,25 @@ async fn run_coupon_store(
 }
 
 async fn run_coupon_my(client: &McpClient) -> Result<()> {
-    let result = client.call_tool("query-my-coupons", serde_json::json!({})).await?;
+    let result = client
+        .call_tool("query-my-coupons", serde_json::json!({}))
+        .await?;
     print_result(&result);
     Ok(())
 }
 
 async fn run_coupon_available(client: &McpClient) -> Result<()> {
-    let result = client.call_tool("available-coupons", serde_json::json!({})).await?;
+    let result = client
+        .call_tool("available-coupons", serde_json::json!({}))
+        .await?;
     print_result(&result);
     Ok(())
 }
 
 async fn run_coupon_receive(client: &McpClient) -> Result<()> {
-    let result = client.call_tool("auto-bind-coupons", serde_json::json!({})).await?;
+    let result = client
+        .call_tool("auto-bind-coupons", serde_json::json!({}))
+        .await?;
     print_result(&result);
     Ok(())
 }
@@ -563,6 +639,7 @@ async fn run_mall_order_detail(client: &McpClient, order_id: &str) -> Result<()>
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_calculate_price(
     client: &McpClient,
     store: &str,
@@ -598,6 +675,7 @@ async fn run_calculate_price(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_order_create(
     client: &McpClient,
     store: &str,
@@ -652,6 +730,145 @@ async fn run_order_query(client: &McpClient, id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn fetch_meal_detail(
+    client: &McpClient,
+    code: &str,
+    store: &str,
+    be: Option<&str>,
+    order_type: i32,
+    be_type: i32,
+    reservation_date: Option<&str>,
+) -> Result<meal::MealDetail> {
+    let mut args = serde_json::json!({
+        "code": code,
+        "storeCode": store,
+        "orderType": order_type,
+        "beType": be_type,
+    });
+    if let Some(b) = be {
+        args["beCode"] = Value::String(b.to_string());
+    }
+    if let Some(r) = reservation_date {
+        args["reservationDate"] = Value::String(r.to_string());
+    }
+    let result = client.call_tool("query-meal-detail", args).await?;
+
+    let data: Value = if let Some(ref structured) = result.structured_content {
+        structured
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| structured.clone())
+    } else {
+        let text = result
+            .content
+            .iter()
+            .filter_map(|c| c.text.clone())
+            .collect::<Vec<_>>()
+            .join("");
+        let mut data = Value::Null;
+        if let Some(idx) = text.find("{\"success\":")
+            && let Ok(json) = serde_json::from_str::<Value>(&text[idx..])
+        {
+            data = json.get("data").cloned().unwrap_or(Value::Null);
+        }
+        data
+    };
+    meal::parse_detail(&data)
+}
+
+type SelectionPlan = (
+    Vec<Vec<usize>>,
+    Vec<Vec<Option<meal::ModSelection>>>,
+    Option<meal::ModSelection>,
+);
+
+fn interactively_select(detail: &meal::MealDetail, qty: u32) -> Result<Value> {
+    let stdin = io::stdin();
+    let mut ui = meal::Ui {
+        reader: &mut stdin.lock(),
+        writer: &mut io::stdout(),
+    };
+    print_divider();
+    println!("🔧 选餐: {} ({})", detail.name, detail.code);
+    print_divider();
+    let (picks, mods, product_mods): SelectionPlan = if detail.rounds.is_empty() {
+        let product_mods = meal::pick_product_mods(&mut ui, detail)?;
+        (Vec::new(), Vec::new(), product_mods)
+    } else {
+        let mut picks = Vec::new();
+        let mut mods = Vec::new();
+        for (i, round) in detail.rounds.iter().enumerate() {
+            let round_picks = meal::pick_round_choices(&mut ui, round, i + 1)?;
+            let round_mods = round_picks
+                .iter()
+                .map(|&idx| meal::pick_mods(&mut ui, &round.choices[idx]))
+                .collect::<Result<Vec<_>>>()?;
+            picks.push(round_picks);
+            mods.push(round_mods);
+        }
+        (picks, mods, None)
+    };
+    let item = meal::build_item_value(detail, qty, &picks, &mods, product_mods);
+    println!("{}", meal::render_selection_summary(detail, &picks, &mods));
+    Ok(item)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_select(
+    client: &McpClient,
+    code: &str,
+    store: &str,
+    be: Option<&str>,
+    order_type: i32,
+    be_type: i32,
+    reservation_date: Option<&str>,
+    qty: u32,
+    pick: Option<&str>,
+    json_only: bool,
+) -> Result<()> {
+    let detail = fetch_meal_detail(
+        client,
+        code,
+        store,
+        be,
+        order_type,
+        be_type,
+        reservation_date,
+    )
+    .await?;
+
+    let (item, summary): (Value, String) = if let Some(spec) = pick {
+        let picks = meal::parse_pick_spec(&detail, spec)?;
+        let mods: Vec<Vec<Option<meal::ModSelection>>> = picks
+            .iter()
+            .map(|round_picks| round_picks.iter().map(|_| None).collect())
+            .collect();
+        let item = meal::build_item_value(&detail, qty, &picks, &mods, None);
+        (item, meal::render_selection_summary(&detail, &picks, &mods))
+    } else {
+        (interactively_select(&detail, qty)?, String::new())
+    };
+
+    if json_only {
+        println!("{}", serde_json::json!([item]));
+    } else {
+        print_divider();
+        println!("🛒 选购清单: {} ({})", detail.name, detail.code);
+        if summary.is_empty() {
+            println!("  {}", detail.name);
+        } else {
+            println!("{}", summary);
+        }
+        println!("\n📦 已生成 items JSON:");
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!([item]))?
+        );
+        println!("提示: 可复制到 price / order create 的 --items，或进入交互模式继续点单");
+    }
+    Ok(())
+}
+
 async fn interactive_mode(client: &McpClient) -> Result<()> {
     loop {
         print_divider();
@@ -672,7 +889,7 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
         println!("13. 门店优惠券");
         println!("14. 我的优惠券 / 一键领券 / 可领券");
         println!("15. 积分商城");
-        println!("16. 快速点单（计算价格+下单）");
+        println!("16. 快速点单（选餐/特调 → 计价 → 下单）");
         println!("17. 查询订单详情");
         println!("0.  退出");
         print_divider();
@@ -731,14 +948,22 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
             }
             "9" => {
                 let bt = read_line("beType (2=麦乐送, 6=团餐，默认2）: ")?;
-                let be_type: i32 = if bt.is_empty() { 2 } else { bt.parse().unwrap_or(2) };
+                let be_type: i32 = if bt.is_empty() {
+                    2
+                } else {
+                    bt.parse().unwrap_or(2)
+                };
                 if let Err(e) = run_address_list(client, be_type).await {
                     println!("❌ 查询失败: {}", e);
                 }
             }
             "10" => {
                 let bt = read_line("beType (2=麦乐送, 6=团餐，默认2）: ")?;
-                let be_type: i32 = if bt.is_empty() { 2 } else { bt.parse().unwrap_or(2) };
+                let be_type: i32 = if bt.is_empty() {
+                    2
+                } else {
+                    bt.parse().unwrap_or(2)
+                };
                 if let Err(e) = run_address_add(client, be_type).await {
                     println!("❌ 添加失败: {}", e);
                 }
@@ -749,9 +974,22 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
                 let ot = read_line("订单类型 (1=到店, 2=外送): ")?;
                 let order_type: i32 = ot.parse().unwrap_or(1);
                 let bt = read_line("beType (1=到店, 2=麦乐送, 5=得来速, 6=团餐，默认1）: ")?;
-                let be_type: i32 = if bt.is_empty() { 1 } else { bt.parse().unwrap_or(1) };
+                let be_type: i32 = if bt.is_empty() {
+                    1
+                } else {
+                    bt.parse().unwrap_or(1)
+                };
                 let rd = read_line_opt("预约时间（回车跳过）: ");
-                if let Err(e) = run_menu(client, &store, be.as_deref(), order_type, be_type, rd.as_deref()).await {
+                if let Err(e) = run_menu(
+                    client,
+                    &store,
+                    be.as_deref(),
+                    order_type,
+                    be_type,
+                    rd.as_deref(),
+                )
+                .await
+                {
                     println!("❌ 查询失败: {}", e);
                 }
             }
@@ -762,9 +1000,23 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
                 let ot = read_line("订单类型 (1=到店, 2=外送): ")?;
                 let order_type: i32 = ot.parse().unwrap_or(1);
                 let bt = read_line("beType (1=到店, 2=麦乐送, 5=得来速, 6=团餐，默认1）: ")?;
-                let be_type: i32 = if bt.is_empty() { 1 } else { bt.parse().unwrap_or(1) };
+                let be_type: i32 = if bt.is_empty() {
+                    1
+                } else {
+                    bt.parse().unwrap_or(1)
+                };
                 let rd = read_line_opt("预约时间（回车跳过）: ");
-                if let Err(e) = run_detail(client, &code, &store, be.as_deref(), order_type, be_type, rd.as_deref()).await {
+                if let Err(e) = run_detail(
+                    client,
+                    &code,
+                    &store,
+                    be.as_deref(),
+                    order_type,
+                    be_type,
+                    rd.as_deref(),
+                )
+                .await
+                {
                     println!("❌ 查询失败: {}", e);
                 }
             }
@@ -774,9 +1026,15 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
                 let ot = read_line("订单类型 (1=到店, 2=外送): ")?;
                 let order_type: i32 = ot.parse().unwrap_or(1);
                 let bt = read_line("beType (1=到店, 2=麦乐送, 5=得来速, 6=团餐，默认1）: ")?;
-                let be_type: i32 = if bt.is_empty() { 1 } else { bt.parse().unwrap_or(1) };
+                let be_type: i32 = if bt.is_empty() {
+                    1
+                } else {
+                    bt.parse().unwrap_or(1)
+                };
                 let rd = read_line_opt("预约时间（回车跳过）: ");
-                if let Err(e) = run_coupon_store(client, &store, &be, order_type, be_type, rd.as_deref()).await {
+                if let Err(e) =
+                    run_coupon_store(client, &store, &be, order_type, be_type, rd.as_deref()).await
+                {
                     println!("❌ 查询失败: {}", e);
                 }
             }
@@ -843,14 +1101,20 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
                         let aid = read_line("配送地址 ID: ")?;
                         let sc = read_line("spuCategory (1=虚拟, 2=实体，默认2）: ")?;
                         let spu_category = if sc.is_empty() { "2".to_string() } else { sc };
-                        if let Err(e) = run_mall_physical(client, sku_id, count, &aid, &spu_category).await {
+                        if let Err(e) =
+                            run_mall_physical(client, sku_id, count, &aid, &spu_category).await
+                        {
                             println!("❌ 兑换失败: {}", e);
                         }
                     }
                     "e" => {
                         let lid = read_line_opt("lastId（翻页用，回车跳过）: ");
                         let sz = read_line("查询数量（默认10）: ")?;
-                        let size: i32 = if sz.is_empty() { 10 } else { sz.parse().unwrap_or(10) };
+                        let size: i32 = if sz.is_empty() {
+                            10
+                        } else {
+                            sz.parse().unwrap_or(10)
+                        };
                         let last_id = lid.and_then(|s| s.parse().ok());
                         if let Err(e) = run_mall_orders(client, last_id, size).await {
                             println!("❌ 查询失败: {}", e);
@@ -866,7 +1130,7 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
                 }
             }
             "16" => {
-                println!("--- 快速点单流程 ---");
+                println!("--- 快速点单流程（支持选配/特调） ---");
                 println!("提示: 门店信息请先从【查看配送地址】或【查询附近门店】中获取");
                 let store = read_line("门店 storeCode: ")?;
                 let be = read_line_opt("门店 beCode（到店/得来速回车跳过）: ");
@@ -874,14 +1138,67 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
                 let ot = read_line("订单类型 (1=到店, 2=外送): ")?;
                 let order_type: i32 = ot.parse().unwrap_or(1);
                 let bt = read_line("beType (1=到店, 2=麦乐送, 5=得来速, 6=团餐，默认1）: ")?;
-                let be_type: i32 = if bt.is_empty() { 1 } else { bt.parse().unwrap_or(1) };
+                let be_type: i32 = if bt.is_empty() {
+                    1
+                } else {
+                    bt.parse().unwrap_or(1)
+                };
                 let rd = read_line_opt("预约时间（回车跳过）: ");
-                let items = read_line(
-                    "商品列表 JSON: [{\"productCode\":\"xxx\",\"quantity\":1}]: ",
-                )?;
+
+                let mut basket: Vec<Value> = Vec::new();
+                loop {
+                    let code = read_line("商品 code（直接回车结束添加）: ")?;
+                    if code.is_empty() {
+                        break;
+                    }
+                    let detail = match fetch_meal_detail(
+                        client,
+                        &code,
+                        &store,
+                        be.as_deref(),
+                        order_type,
+                        be_type,
+                        rd.as_deref(),
+                    )
+                    .await
+                    {
+                        Ok(detail) => detail,
+                        Err(e) => {
+                            println!("❌ 查询餐品失败: {}", e);
+                            continue;
+                        }
+                    };
+                    match interactively_select(&detail, 1) {
+                        Ok(item) => {
+                            basket.push(item);
+                            println!("✅ 已加入购物篮，共 {} 件", basket.len());
+                        }
+                        Err(e) => println!("❌ 选餐失败: {}", e),
+                    }
+                }
+
+                if basket.is_empty() {
+                    println!("购物篮为空，返回菜单");
+                    continue;
+                }
+                println!("📦 购物篮:");
+                for item in &basket {
+                    println!("  {}", serde_json::to_string(item)?);
+                }
+                let items = serde_json::to_string(&basket)?;
                 println!("\n正在计算价格...");
-                if let Err(e) =
-                    run_calculate_price(client, &store, be.as_deref(), order_type, be_type, rd.as_deref(), None, None, &items).await
+                if let Err(e) = run_calculate_price(
+                    client,
+                    &store,
+                    be.as_deref(),
+                    order_type,
+                    be_type,
+                    rd.as_deref(),
+                    None,
+                    None,
+                    &items,
+                )
+                .await
                 {
                     println!("❌ 计价失败: {}", e);
                     continue;
@@ -890,7 +1207,9 @@ async fn interactive_mode(client: &McpClient) -> Result<()> {
                 if confirm.eq_ignore_ascii_case("y") {
                     println!("\n正在创建订单...");
                     let take_way = if order_type == 1 || be_type == 5 {
-                        read_line_opt("取餐方式编码 takeWayCode（从calculate-price结果获取，回车跳过）: ")
+                        read_line_opt(
+                            "取餐方式编码 takeWayCode（从calculate-price结果获取，回车跳过）: ",
+                        )
                     } else {
                         None
                     };
@@ -966,7 +1285,10 @@ async fn main() -> Result<()> {
             let cfg = Config::load()?;
             println!("配置文件路径: {}", Config::config_path()?.display());
             println!("token: {}", cfg.token.as_deref().unwrap_or("(未设置)"));
-            println!("url:   {}", cfg.url.as_deref().unwrap_or("(默认 https://mcp.mcd.cn)"));
+            println!(
+                "url:   {}",
+                cfg.url.as_deref().unwrap_or("(默认 https://mcp.mcd.cn)")
+            );
             return Ok(());
         }
         _ => {}
@@ -981,43 +1303,134 @@ async fn main() -> Result<()> {
         Some(Commands::Calendar) => run_calendar(&client).await?,
         Some(Commands::Time) => run_time(&client).await?,
         Some(Commands::Account) => run_account(&client).await?,
-        Some(Commands::Nearby { be_type, search_type, city, keyword }) => {
-            run_nearby(&client, be_type, search_type, city.as_deref(), keyword.as_deref()).await?
+        Some(Commands::Nearby {
+            be_type,
+            search_type,
+            city,
+            keyword,
+        }) => {
+            run_nearby(
+                &client,
+                be_type,
+                search_type,
+                city.as_deref(),
+                keyword.as_deref(),
+            )
+            .await?
         }
         Some(Commands::Address { action }) => match action {
             AddressCommands::List { be_type } => run_address_list(&client, be_type).await?,
             AddressCommands::Add { be_type } => run_address_add(&client, be_type).await?,
         },
-        Some(Commands::DeliveryStores { address_id, be_type }) => {
-            run_delivery_stores(&client, &address_id, be_type).await?
-        }
-        Some(Commands::Catering { store, be, reservation_date }) => {
-            run_catering(&client, &store, &be, reservation_date.as_deref()).await?
-        }
+        Some(Commands::DeliveryStores {
+            address_id,
+            be_type,
+        }) => run_delivery_stores(&client, &address_id, be_type).await?,
+        Some(Commands::Catering {
+            store,
+            be,
+            reservation_date,
+        }) => run_catering(&client, &store, &be, reservation_date.as_deref()).await?,
         Some(Commands::Nutrition) => run_nutrition(&client).await?,
-        Some(Commands::Menu { store, be, order_type, be_type, reservation_date }) => {
-            run_menu(&client, &store, be.as_deref(), order_type, be_type, reservation_date.as_deref()).await?
+        Some(Commands::Menu {
+            store,
+            be,
+            order_type,
+            be_type,
+            reservation_date,
+        }) => {
+            run_menu(
+                &client,
+                &store,
+                be.as_deref(),
+                order_type,
+                be_type,
+                reservation_date.as_deref(),
+            )
+            .await?
         }
-        Some(Commands::Detail { code, store, be, order_type, be_type, reservation_date }) => {
-            run_detail(&client, &code, &store, be.as_deref(), order_type, be_type, reservation_date.as_deref()).await?
+        Some(Commands::Detail {
+            code,
+            store,
+            be,
+            order_type,
+            be_type,
+            reservation_date,
+            mods,
+        }) => {
+            fmt::set_show_mods(mods);
+            run_detail(
+                &client,
+                &code,
+                &store,
+                be.as_deref(),
+                order_type,
+                be_type,
+                reservation_date.as_deref(),
+            )
+            .await?
+        }
+        Some(Commands::Select {
+            code,
+            store,
+            be,
+            order_type,
+            be_type,
+            reservation_date,
+            qty,
+            pick,
+            json,
+        }) => {
+            run_select(
+                &client,
+                &code,
+                &store,
+                be.as_deref(),
+                order_type,
+                be_type,
+                reservation_date.as_deref(),
+                qty,
+                pick.as_deref(),
+                json,
+            )
+            .await?
         }
         Some(Commands::Coupon { action }) => match action {
-            CouponCommands::Store { store, be, order_type, be_type, reservation_date } => {
-                run_coupon_store(&client, &store, &be, order_type, be_type, reservation_date.as_deref()).await?
+            CouponCommands::Store {
+                store,
+                be,
+                order_type,
+                be_type,
+                reservation_date,
+            } => {
+                run_coupon_store(
+                    &client,
+                    &store,
+                    &be,
+                    order_type,
+                    be_type,
+                    reservation_date.as_deref(),
+                )
+                .await?
             }
             CouponCommands::My => run_coupon_my(&client).await?,
             CouponCommands::Available => run_coupon_available(&client).await?,
             CouponCommands::Receive => run_coupon_receive(&client).await?,
         },
         Some(Commands::Mall { action }) => match action {
-            MallCommands::Products { cat_rule_ids } => run_mall_products(&client, cat_rule_ids.as_deref()).await?,
+            MallCommands::Products { cat_rule_ids } => {
+                run_mall_products(&client, cat_rule_ids.as_deref()).await?
+            }
             MallCommands::Detail { spu_id } => run_mall_detail(&client, spu_id).await?,
             MallCommands::Exchange { sku_id, count } => {
                 run_mall_exchange(&client, sku_id, count).await?
             }
-            MallCommands::Physical { sku_id, count, address_id, spu_category } => {
-                run_mall_physical(&client, sku_id, count, &address_id, &spu_category).await?
-            }
+            MallCommands::Physical {
+                sku_id,
+                count,
+                address_id,
+                spu_category,
+            } => run_mall_physical(&client, sku_id, count, &address_id, &spu_category).await?,
             MallCommands::Orders { last_id, size } => {
                 run_mall_orders(&client, last_id, size).await?
             }
@@ -1025,11 +1438,43 @@ async fn main() -> Result<()> {
                 run_mall_order_detail(&client, &order_id).await?
             }
         },
-        Some(Commands::Price { store, be, order_type, be_type, reservation_date, coupon_id, coupon_code, items }) => {
-            run_calculate_price(&client, &store, be.as_deref(), order_type, be_type, reservation_date.as_deref(), coupon_id.as_deref(), coupon_code.as_deref(), &items).await?
+        Some(Commands::Price {
+            store,
+            be,
+            order_type,
+            be_type,
+            reservation_date,
+            coupon_id,
+            coupon_code,
+            items,
+        }) => {
+            run_calculate_price(
+                &client,
+                &store,
+                be.as_deref(),
+                order_type,
+                be_type,
+                reservation_date.as_deref(),
+                coupon_id.as_deref(),
+                coupon_code.as_deref(),
+                &items,
+            )
+            .await?
         }
         Some(Commands::Order { action }) => match action {
-            OrderCommands::Create { store, be, address, items, order_type, be_type, take_way, reservation_date, coupon_id, coupon_code, gm_service_code } => {
+            OrderCommands::Create {
+                store,
+                be,
+                address,
+                items,
+                order_type,
+                be_type,
+                take_way,
+                reservation_date,
+                coupon_id,
+                coupon_code,
+                gm_service_code,
+            } => {
                 run_order_create(
                     &client,
                     &store,
