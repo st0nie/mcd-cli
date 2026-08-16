@@ -122,10 +122,11 @@ pub struct App {
     combo_state: ListState,
     combo_picks: Vec<Vec<usize>>, // 已确认的每轮选中 indices
     combo_mods: Vec<Vec<Option<ModSelection>>>, // 每轮每个选中 choice 的特调
-    mods_round: usize, // 当前处理特调的轮次
+    combo_mods_map: Vec<Vec<Option<ModSelection>>>, // 每轮每 choice 的即时特调结果
+    mods_target_ri: usize, // 当前即时特调目标轮次
+    mods_target_ci: usize, // 当前即时特调目标 choice
 
     // 特调
-    mods_choice_idx: usize, // 当前处理的选中的 choice 序号
     mods_groups: Vec<ModGroup>, // 当前 choice 的待交互 group
     mods_group_idx: usize,
     mods_toggle: Vec<bool>,
@@ -358,8 +359,9 @@ impl App {
             combo_state: ListState::default(),
             combo_picks: Vec::new(),
             combo_mods: Vec::new(),
-            mods_round: 0,
-            mods_choice_idx: 0,
+            combo_mods_map: Vec::new(),
+            mods_target_ri: 0,
+            mods_target_ci: 0,
             mods_groups: Vec::new(),
             mods_group_idx: 0,
             mods_toggle: Vec::new(),
@@ -719,10 +721,16 @@ impl App {
                                         })
                                         .collect();
                                     let n = detail.rounds.len();
+                                    let mods_map: Vec<Vec<Option<ModSelection>>> = detail
+                                        .rounds
+                                        .iter()
+                                        .map(|r| vec![None; r.choices.len()])
+                                        .collect();
                                     self.detail = Some(detail);
                                     self.combo_toggles = toggles;
                                     self.combo_picks = vec![Vec::new(); n];
                                     self.combo_mods = vec![Vec::new(); n];
+                                    self.combo_mods_map = mods_map;
                                     self.combo_state = ListState::default();
                                     self.combo_state.select(Some(0));
                                     self.screen = Screen::Combo;
@@ -941,6 +949,7 @@ impl App {
                 let i = self.combo_state.selected().unwrap_or(0);
                 if let Some((ri, Some(ci))) = self.combo_flat().get(i).copied() {
                     self.combo_toggle_choice(ri, ci);
+                    self.maybe_enter_mods(ri, ci).await?;
                 }
             }
             KeyCode::Enter => {
@@ -949,6 +958,7 @@ impl App {
                     let round = &self.rounds()[ri];
                     if round.min_quantity == 1 && round.max_quantity == 1 {
                         self.combo_toggle_choice(ri, ci);
+                        self.maybe_enter_mods(ri, ci).await?;
                     }
                 }
             }
@@ -996,6 +1006,29 @@ impl App {
         }
     }
 
+    async fn maybe_enter_mods(&mut self, ri: usize, ci: usize) -> Result<()> {
+        let choice = &self.rounds()[ri].choices[ci];
+        if let Some(modification) = choice.modification.as_ref()
+            && !modification.items.is_empty()
+        {
+            let (groups, auto) = build_mod_groups(modification);
+            self.mods_values = auto;
+            self.mods_groups = groups;
+            self.mods_group_idx = 0;
+            if self.mods_groups.is_empty() {
+                // 全自动，直接记录
+                self.combo_mods_map[ri][ci] =
+                    Some(ModSelection { values: self.mods_values.clone() });
+            } else {
+                self.mods_target_ri = ri;
+                self.mods_target_ci = ci;
+                self.init_mods_group();
+                self.screen = Screen::Mods;
+            }
+        }
+        Ok(())
+    }
+
     async fn combo_done(&mut self) -> Result<()> {
         for (ri, round) in self.rounds().iter().enumerate() {
             let n = self.combo_toggles[ri].iter().filter(|b| **b).count() as i64;
@@ -1028,49 +1061,15 @@ impl App {
         self.combo_mods = self
             .combo_picks
             .iter()
-            .map(|p| vec![None; p.len()])
+            .enumerate()
+            .map(|(ri, picks)| {
+                picks
+                    .iter()
+                    .map(|&ci| self.combo_mods_map[ri][ci].clone())
+                    .collect()
+            })
             .collect();
-        self.mods_round = 0;
-        self.mods_choice_idx = 0;
-        self.screen = Screen::Combo;
-        self.advance_mods().await
-    }
-
-    async fn advance_mods(&mut self) -> Result<()> {
-        loop {
-            let picks = self.combo_picks[self.mods_round].clone();
-            if self.mods_choice_idx < picks.len() {
-                let choice_idx = picks[self.mods_choice_idx];
-                let choice = &self.rounds()[self.mods_round].choices[choice_idx];
-                match &choice.modification {
-                    Some(modification) if !modification.items.is_empty() => {
-                        let (groups, auto) = build_mod_groups(modification);
-                        self.mods_values = auto;
-                        self.mods_groups = groups;
-                        self.mods_group_idx = 0;
-                        if self.mods_groups.is_empty() {
-                            self.combo_mods[self.mods_round][self.mods_choice_idx] =
-                                Some(ModSelection { values: self.mods_values.clone() });
-                            self.mods_choice_idx += 1;
-                            continue;
-                        }
-                        self.init_mods_group();
-                        self.screen = Screen::Mods;
-                        return Ok(());
-                    }
-                    _ => {
-                        self.mods_choice_idx += 1;
-                    }
-                }
-            } else {
-                // 本轮所有选中 choice 处理完，进入下一轮
-                self.mods_round += 1;
-                self.mods_choice_idx = 0;
-                if self.mods_round >= self.rounds().len() {
-                    return self.finish_add_combo().await;
-                }
-            }
-        }
+        self.finish_add_combo().await
     }
 
     fn init_mods_group(&mut self) {
@@ -1153,13 +1152,12 @@ impl App {
                     self.screen = Screen::Menu;
                     self.set_status(format!("已加购 {}", detail.name), StatusKind::Info);
                 } else {
-                    // 当前 choice 特调完成，继续下一个
-                    let round_idx = self.mods_round;
-                    self.combo_mods[round_idx][self.mods_choice_idx] =
+                    // 即时特调（套餐 choice）完成，存结果回到选餐页
+                    let ri = self.mods_target_ri;
+                    let ci = self.mods_target_ci;
+                    self.combo_mods_map[ri][ci] =
                         Some(ModSelection { values: self.mods_values.clone() });
-                    self.mods_choice_idx += 1;
                     self.screen = Screen::Combo;
-                    self.advance_mods().await?;
                 }
             }
             _ => {}
