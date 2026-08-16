@@ -31,7 +31,6 @@ enum Screen {
     Menu,
     Combo,
     Mods,
-    Basket,
     Price,
     OrderResult,
 }
@@ -47,6 +46,7 @@ enum MenuFocus {
     Search,
     Category,
     Items,
+    Basket,
 }
 
 struct StoreItem {
@@ -391,7 +391,14 @@ impl App {
 
     async fn handle_key(&mut self, code: KeyCode) -> Result<()> {
         match code {
-            KeyCode::Char('q') | KeyCode::Esc if self.screen != Screen::StoreSearch => {
+            KeyCode::Char('q') if self.screen != Screen::StoreSearch => {
+                self.go_back();
+                return Ok(());
+            }
+            KeyCode::Esc
+                if self.screen != Screen::StoreSearch
+                    && !(self.screen == Screen::Menu && self.menu_focus == MenuFocus::Search) =>
+            {
                 self.go_back();
                 return Ok(());
             }
@@ -408,7 +415,6 @@ impl App {
             Screen::Menu => self.handle_menu(code).await?,
             Screen::Combo => self.handle_combo(code).await?,
             Screen::Mods => self.handle_mods(code).await?,
-            Screen::Basket => self.handle_basket(code).await?,
             Screen::Price => self.handle_price(code).await?,
             Screen::OrderResult => {
                 self.should_exit = true;
@@ -423,9 +429,8 @@ impl App {
             Screen::Menu => Screen::StoreList,
             Screen::Combo => Screen::Menu,
             Screen::Mods => Screen::Combo,
-            Screen::Basket => Screen::Menu,
-            Screen::Price => Screen::Basket,
-            Screen::OrderResult => Screen::Basket,
+            Screen::Price => Screen::Menu,
+            Screen::OrderResult => Screen::Menu,
             Screen::StoreSearch => Screen::StoreSearch,
         };
         self.set_status("已返回", StatusKind::Info);
@@ -556,7 +561,8 @@ impl App {
             self.menu_focus = match self.menu_focus {
                 MenuFocus::Search => MenuFocus::Category,
                 MenuFocus::Category => MenuFocus::Items,
-                MenuFocus::Items => MenuFocus::Search,
+                MenuFocus::Items => MenuFocus::Basket,
+                MenuFocus::Basket => MenuFocus::Search,
             };
             return Ok(());
         }
@@ -583,7 +589,7 @@ impl App {
                     self.menu_state.select(Some(0));
                 }
                 KeyCode::Enter | KeyCode::Right => self.menu_focus = MenuFocus::Items,
-                KeyCode::Char('b') => self.open_basket(),
+                KeyCode::Char('b') => self.menu_focus = MenuFocus::Basket,
                 _ => {}
             },
             MenuFocus::Items => {
@@ -591,7 +597,7 @@ impl App {
                 match code {
                     KeyCode::Up | KeyCode::Char('k') => list_prev(&mut self.menu_state, visible.len()),
                     KeyCode::Down | KeyCode::Char('j') => list_next(&mut self.menu_state, visible.len()),
-                    KeyCode::Char('b') => self.open_basket(),
+                    KeyCode::Char('b') => self.menu_focus = MenuFocus::Basket,
                     KeyCode::Enter => {
                         let Some(sel) = self.menu_state.selected() else { return Ok(()) };
                         let Some(&orig_idx) = visible.get(sel) else { return Ok(()) };
@@ -624,6 +630,24 @@ impl App {
                     _ => {}
                 }
             }
+            MenuFocus::Basket => match code {
+                KeyCode::Up | KeyCode::Char('k') => list_prev(&mut self.basket_state, self.basket.len()),
+                KeyCode::Down | KeyCode::Char('j') => list_next(&mut self.basket_state, self.basket.len()),
+                KeyCode::Char('d') => {
+                    if let Some(i) = self.basket_state.selected()
+                        && i < self.basket.len()
+                    {
+                        self.basket.remove(i);
+                        if i >= self.basket.len() {
+                            self.basket_state.select(self.basket.len().checked_sub(1));
+                        }
+                    }
+                }
+                KeyCode::Char('c') => self.basket.clear(),
+                KeyCode::Char('p') => self.price_basket().await?,
+                KeyCode::Char('l') => self.menu_focus = MenuFocus::Items,
+                _ => {}
+            },
         }
         Ok(())
     }
@@ -932,60 +956,27 @@ impl App {
         }
     }
 
-    fn open_basket(&mut self) {
-        self.basket_state = ListState::default();
-        if !self.basket.is_empty() {
-            self.basket_state.select(Some(0));
+    async fn price_basket(&mut self) -> Result<()> {
+        if self.basket.is_empty() {
+            self.set_status("购物篮为空，先去菜单加购", StatusKind::Error);
+            return Ok(());
         }
-        self.screen = Screen::Basket;
-        self.set_status("d 删除，p 计价，c 清空，Esc 返回菜单", StatusKind::Info);
-    }
-
-    async fn handle_basket(&mut self, code: KeyCode) -> Result<()> {
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                list_prev(&mut self.basket_state, self.basket.len())
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                list_next(&mut self.basket_state, self.basket.len())
-            }
-            KeyCode::Char('d') => {
-                if let Some(i) = self.basket_state.selected()
-                    && i < self.basket.len()
+        let store = self.store_code.clone().unwrap_or_default();
+        let items: Vec<Value> = self.basket.iter().map(|b| b.item.clone()).collect();
+        self.set_status("正在计价...", StatusKind::Info);
+        match calc_price(&self.client, &store, &items).await {
+            Ok(price) => {
+                self.price = Some(price);
+                self.takeway_state = ListState::default();
+                if let Some(p) = &self.price
+                    && !p.take_ways.is_empty()
                 {
-                    self.basket.remove(i);
-                    if i >= self.basket.len() {
-                        self.basket_state.select(self.basket.len().checked_sub(1));
-                    }
+                    self.takeway_state.select(Some(0));
                 }
+                self.screen = Screen::Price;
+                self.set_status("↑↓ 选取餐方式，Enter 确认下单", StatusKind::Info);
             }
-            KeyCode::Char('c') => {
-                self.basket.clear();
-            }
-            KeyCode::Char('p') => {
-                if self.basket.is_empty() {
-                    self.set_status("购物篮为空，先去菜单加购", StatusKind::Error);
-                    return Ok(());
-                }
-                let store = self.store_code.clone().unwrap_or_default();
-                let items: Vec<Value> = self.basket.iter().map(|b| b.item.clone()).collect();
-                self.set_status("正在计价...", StatusKind::Info);
-                match calc_price(&self.client, &store, &items).await {
-                    Ok(price) => {
-                        self.price = Some(price);
-                        self.takeway_state = ListState::default();
-                        if let Some(p) = &self.price
-                            && !p.take_ways.is_empty()
-                        {
-                            self.takeway_state.select(Some(0));
-                        }
-                        self.screen = Screen::Price;
-                        self.set_status("↑↓ 选取餐方式，Enter 确认下单", StatusKind::Info);
-                    }
-                    Err(e) => self.set_status(format!("计价失败: {e}"), StatusKind::Error),
-                }
-            }
-            _ => {}
+            Err(e) => self.set_status(format!("计价失败: {e}"), StatusKind::Error),
         }
         Ok(())
     }
@@ -1081,7 +1072,6 @@ impl App {
             Screen::Menu => self.render_menu(frame, chunks[1]),
             Screen::Combo => self.render_combo(frame, chunks[1]),
             Screen::Mods => self.render_mods(frame, chunks[1]),
-            Screen::Basket => self.render_basket(frame, chunks[1]),
             Screen::Price => self.render_price(frame, chunks[1]),
             Screen::OrderResult => self.render_order_result(frame, chunks[1]),
         }
@@ -1189,7 +1179,11 @@ impl App {
 
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(25), Constraint::Percentage(75)])
+            .constraints([
+                Constraint::Percentage(22),
+                Constraint::Percentage(48),
+                Constraint::Percentage(30),
+            ])
             .split(chunks[1]);
 
         // 左栏：分类
@@ -1212,7 +1206,7 @@ impl App {
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
         frame.render_stateful_widget(cat_list, body[0], &mut self.menu_cat_state);
 
-        // 右栏：过滤后的餐品
+        // 中栏：过滤后的餐品
         let visible = self.visible_menu();
         let items_border = if self.menu_focus == MenuFocus::Items {
             Color::Yellow
@@ -1240,6 +1234,39 @@ impl App {
             )
             .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
         frame.render_stateful_widget(list, body[1], &mut self.menu_state);
+
+        // 右栏：购物篮（常驻）
+        let basket_border = if self.menu_focus == MenuFocus::Basket {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
+        let total: u32 = self.basket.iter().map(|b| b.qty).sum();
+        let basket_block = Block::default()
+            .title(format!(" 购物篮（{total} 件） "))
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(basket_border));
+        if self.basket.is_empty() {
+            let p = Paragraph::new("空，去菜单加购吧\n\n选中购物篮后:\nd 删除 · p 计价 · c 清空")
+                .block(basket_block)
+                .wrap(Wrap { trim: true });
+            frame.render_widget(p, body[2]);
+        } else {
+            let b_items: Vec<ListItem> = self
+                .basket
+                .iter()
+                .map(|b| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!(" {} ", b.label), Style::default().fg(Color::White)),
+                        Span::styled(format!("x{}", b.qty), Style::default().fg(Color::Yellow)),
+                    ]))
+                })
+                .collect();
+            let blist = List::new(b_items)
+                .block(basket_block)
+                .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
+            frame.render_stateful_widget(blist, body[2], &mut self.basket_state);
+        }
     }
 
     fn render_combo(&mut self, frame: &mut Frame, area: Rect) {
@@ -1365,35 +1392,6 @@ impl App {
             Paragraph::new(Span::styled(hint, Style::default().fg(Color::Gray))),
             inner[2],
         );
-    }
-
-    fn render_basket(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .basket
-            .iter()
-            .map(|b| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {} ", b.label), Style::default().fg(Color::White)),
-                    Span::styled(format!("x{}", b.qty), Style::default().fg(Color::Yellow)),
-                ]))
-            })
-            .collect();
-        let body = if self.basket.is_empty() {
-            Paragraph::new("购物篮为空，回菜单加购吧")
-        } else {
-            Paragraph::new("")
-        };
-        let list = List::new(items)
-            .block(Block::default().title(format!(
-                " 购物篮（{} 件） ",
-                self.basket.iter().map(|b| b.qty).sum::<u32>()
-            )).borders(Borders::ALL))
-            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::Yellow));
-        if self.basket.is_empty() {
-            frame.render_widget(body.block(Block::default().borders(Borders::ALL)), area);
-        } else {
-            frame.render_stateful_widget(list, area, &mut self.basket_state);
-        }
     }
 
     fn render_price(&mut self, frame: &mut Frame, area: Rect) {
