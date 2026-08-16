@@ -146,6 +146,7 @@ pub struct App {
     // 下单结果
     order_id: String,
     order_pay_url: String,
+    order_qr_url: String, // jumpToApp 跳转支付链接（二维码内容）
     qr_path: String,
 
     // 最近一次渲染区域（鼠标定位用）
@@ -375,6 +376,7 @@ impl App {
             takeway_state: ListState::default(),
             order_id: String::new(),
             order_pay_url: String::new(),
+            order_qr_url: String::new(),
             qr_path: String::new(),
             last_area: Rect::default(),
         }
@@ -1308,9 +1310,13 @@ impl App {
                             .and_then(|v| v.as_str())
                             .unwrap_or("-")
                             .to_string();
+                        // 二维码内容用 jumpToApp 跳转支付链接（麦当劳 APP 扫）
+                        let jump_url = format!("https://m.mcd.cn/mcp/jumpToApp?orderId={order_id}");
                         self.order_id = order_id.clone();
                         self.order_pay_url = pay_url.clone();
-                        self.qr_path = save_qr(&pay_url, &order_id).unwrap_or_else(|e| format!("(二维码保存失败: {e})"));
+                        self.order_qr_url = jump_url.clone();
+                        self.qr_path = save_qr(&jump_url, &order_id)
+                            .unwrap_or_else(|e| format!("(二维码保存失败: {e})"));
                         self.screen = Screen::OrderResult;
                         self.set_status("下单成功！q 退出", StatusKind::Info);
                     }
@@ -1840,9 +1846,9 @@ impl App {
         frame.render_widget(p, chunks[0]);
 
         // 右：二维码字符画
-        let qr_lines: Vec<Line> = if self.order_pay_url.is_empty() {
+        let qr_lines: Vec<Line> = if self.order_qr_url.is_empty() {
             vec![Line::from("(无二维码)")]
-        } else if let Ok(code) = QrCode::new(self.order_pay_url.as_bytes()) {
+        } else if let Ok(code) = QrCode::new(self.order_qr_url.as_bytes()) {
             let qr = code.render::<unicode::Dense1x2>().quiet_zone(true).build();
             qr.lines()
                 .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::White))))
