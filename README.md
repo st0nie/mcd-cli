@@ -186,6 +186,7 @@ ITEMS=$(./mcd-cli select 9900013304 --store 1990366 --order-type 1 --be-type 1 \
 | `order create` | 创建订单 |
 | `order query` | 查询订单 |
 | `interactive` | 交互式菜单 |
+| `tui` | 交互式 TUI 点餐界面（门店搜索→菜单→选餐特调→购物篮→下单→二维码） |
 
 ## 技术说明
 

@@ -220,6 +220,14 @@ mcd-cli address add    # add new address
 
 > Actual codes vary by store. Always verify with `mcd-cli menu`.
 
+## TUI ordering
+
+```bash
+mcd-cli tui
+```
+
+Full-screen interactive ordering: store search → menu browse → 随心配 combo rounds + 特调 → basket → price → order create → QR code (saved to `/tmp/mcd-qrcode/<orderId>.png`). Keyboard: `↑↓`/`jk` navigate, `Enter` select, `Tab` switch input, `Space` toggle multi-select, `b` basket, `p` price, `q`/`Esc` back or quit.
+
 ## Notes
 
 - Token rate limit: 600 requests/minute per token.

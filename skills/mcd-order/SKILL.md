@@ -25,6 +25,16 @@ export MCD_MCP_TOKEN=<TOKEN>
 mcd-cli --token <TOKEN> <command>
 ```
 
+## TUI mode (optional)
+
+For a full-screen interactive ordering experience, use `tui` instead of the CLI steps below: it walks store search → menu browse → combo customization (随心配 + 特调) → basket → price → order create → QR. Keyboard: `↑↓`/`jk` navigate, `Enter` select, `Tab` switch input, `Space` toggle, `b` basket, `p` price, `q`/`Esc` back or quit.
+
+```bash
+mcd-cli tui
+```
+
+All CLI commands below remain available and unchanged.
+
 ## Workflow
 
 ### 1. Find a store
