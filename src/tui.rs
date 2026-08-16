@@ -771,9 +771,9 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<()> {
-        // crossterm 鼠标坐标是 1-based，ratatui Rect 是 0-based，减 1 对齐
-        let col = mouse.column.saturating_sub(1);
-        let row = mouse.row.saturating_sub(1);
+        // crossterm 鼠标坐标已是 0-based（解析时内部减过 1），直接使用
+        let col = mouse.column;
+        let row = mouse.row;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => match self.screen {
                 Screen::StoreSearch => {
@@ -795,7 +795,7 @@ impl App {
                         ])
                         .split(popup);
                     if let Some(i) =
-                        list_index_at(inner[1], row, self.store_state.offset(), self.stores.len())
+                        list_index_at(inner[1], row, self.store_state.offset(), self.stores.len(), 2)
                     {
                         self.store_state.select(Some(i));
                     }
@@ -816,6 +816,7 @@ impl App {
                         row,
                         self.combo_state.offset(),
                         self.combo_flat().len(),
+                        1,
                     ) {
                         self.combo_state.select(Some(i));
                     }
@@ -835,7 +836,7 @@ impl App {
                         .get(self.mods_group_idx)
                         .map(|g| g.item.len())
                         .unwrap_or(0);
-                    if let Some(i) = list_index_at(inner[1], row, self.mods_state.offset(), len) {
+                    if let Some(i) = list_index_at(inner[1], row, self.mods_state.offset(), len, 1) {
                         self.mods_state.select(Some(i));
                     }
                 }
@@ -846,7 +847,7 @@ impl App {
                         .constraints([Constraint::Length(8), Constraint::Min(1)])
                         .split(area);
                     let n = self.price.as_ref().map(|p| p.take_ways.len()).unwrap_or(0);
-                    if let Some(i) = list_index_at(chunks[1], row, self.takeway_state.offset(), n)
+                    if let Some(i) = list_index_at(chunks[1], row, self.takeway_state.offset(), n, 1)
                     {
                         self.takeway_state.select(Some(i));
                     }
@@ -861,7 +862,7 @@ impl App {
     }
 
     fn mouse_menu(&mut self, col: u16, row: u16) {
-        let area = self.last_area;
+        let area = content_area(self.last_area);
         if row == area.y {
             self.menu_focus = MenuFocus::Search;
             return;
@@ -874,6 +875,7 @@ impl App {
                 row,
                 self.menu_cat_state.offset(),
                 self.menu_categories.len() + 1,
+                1,
             ) {
                 self.menu_cat_state.select(Some(i));
                 self.menu_state.select(Some(0));
@@ -881,16 +883,29 @@ impl App {
         } else if col < panes[1].right() {
             self.menu_focus = MenuFocus::Items;
             let visible = self.visible_menu();
-            if let Some(i) = list_index_at(panes[1], row, self.menu_state.offset(), visible.len())
+            if let Some(i) =
+                list_index_at(panes[1], row, self.menu_state.offset(), visible.len(), 1)
             {
                 self.menu_state.select(Some(i));
             }
         } else {
             self.menu_focus = MenuFocus::Basket;
-            if let Some(i) = list_index_at(panes[2], row, self.basket_state.offset(), self.basket.len())
-            {
+            self.mouse_basket_select(panes[2], row);
+        }
+    }
+
+    fn mouse_basket_select(&mut self, list_rect: Rect, row: u16) {
+        if row < list_rect.y + 1 {
+            return;
+        }
+        let mut rel = (row - list_rect.y - 1) as usize;
+        for (i, b) in self.basket.iter().enumerate() {
+            let h = 1 + b.detail.split(" + ").count();
+            if rel < h {
                 self.basket_state.select(Some(i));
+                return;
             }
+            rel -= h;
         }
     }
 
@@ -1918,11 +1933,18 @@ fn menu_panes(area: Rect) -> [Rect; 3] {
     [body[0], body[1], body[2]]
 }
 
-fn list_index_at(list_rect: Rect, row: u16, offset: usize, len: usize) -> Option<usize> {
+fn list_index_at(
+    list_rect: Rect,
+    row: u16,
+    offset: usize,
+    len: usize,
+    rows_per_item: usize,
+) -> Option<usize> {
     if row < list_rect.y + 1 {
         return None;
     }
-    let idx = (row - list_rect.y - 1) as usize + offset;
+    let rel = (row - list_rect.y - 1) as usize;
+    let idx = rel / rows_per_item.max(1) + offset;
     if idx < len {
         Some(idx)
     } else {
